@@ -67,7 +67,7 @@ def get_data_freshness(table_name):
     except Exception as e:
         return (True, 0, "CheckError")
 
-# === 🔥 3. 战报工厂 (傻瓜打印机模式) ===
+# === 🔥 3. 战报工厂 (通用渲染模式) ===
 
 def generate_hot_reports(processors_config):
     bj_now = datetime.now(timezone(timedelta(hours=8)))
@@ -92,7 +92,6 @@ def generate_hot_reports(processors_config):
                     md_report += f"> *距上次更新已过 {int(mins_ago/60)} 小时，暂无新数据。*\n\n"
                     continue 
 
-                # 🔥 关键：获取包含 header 和 rows 的数据包
                 sector_data = config["module"].get_hot_items(supabase, table)
                 if not sector_data: continue
 
@@ -103,13 +102,14 @@ def generate_hot_reports(processors_config):
                 for sector, data in sector_data.items():
                     md_report += f"### 🏷️ 板块：{sector}\n"
                     
-                    # 🔥 兼容性修复：既支持字典(新版)，也支持列表(旧版兜底)
+                    # 🔥 渲染逻辑：优先使用插件提供的 header 和 rows
                     if isinstance(data, dict):
                         if "header" in data: md_report += data["header"] + "\n"
                         if "rows" in data and isinstance(data["rows"], list):
                             for row in data["rows"]: md_report += row + "\n"
+                    
+                    # 兼容旧版列表格式 (防止 GitHub 等未更新插件报错)
                     elif isinstance(data, list):
-                        # 旧版兼容：如果插件还是返回列表，尝试用默认格式打印
                         md_report += "| 信号 | 内容 | 🔗 |\n| :--- | :--- | :--- |\n"
                         for item in data:
                             md_report += f"| {item.get('score','-')} | {item.get('full_text','-')} | [🔗]({item.get('url','#')}) |\n"
