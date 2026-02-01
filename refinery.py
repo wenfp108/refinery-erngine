@@ -1,6 +1,5 @@
 import os, json, base64, requests, importlib.util, sys
 from datetime import datetime, timedelta, timezone
-import pandas as pd
 from supabase import create_client
 from github import Github, Auth
 
@@ -37,10 +36,15 @@ def get_all_processors():
             except Exception as e: print(f"⚠️ 插件 {name} 加载失败: {e}")
     return procs
 
-# === ⏱️ 辅助：检查数据新鲜度 ===
+# === ⏱️ 辅助：检查数据新鲜度 (防NULL版) ===
 def get_data_freshness(table_name):
     try:
-        res = supabase.table(table_name).select("bj_time").order("bj_time", desc=True).limit(1).execute()
+        res = supabase.table(table_name)\
+            .select("bj_time")\
+            .neq("bj_time", "null")\
+            .order("bj_time", desc=True)\
+            .limit(1)\
+            .execute()
         if not res.data: return (False, 9999, "无数据")
         
         last_time_str = res.data[0]['bj_time']
@@ -63,17 +67,16 @@ def get_data_freshness(table_name):
     except Exception as e:
         return (True, 0, "CheckError")
 
-# === 🔥 3. 战报工厂 (含标签列) ===
+# === 🔥 3. 战报工厂 (只负责输出) ===
 
 def generate_hot_reports(processors_config):
     bj_now = datetime.now(timezone(timedelta(hours=8)))
-    
     file_name = bj_now.strftime('%Y-%m-%d-%H') + ".md"
     report_path = f"reports/{file_name}"
     date_display = bj_now.strftime('%Y-%m-%d %H:%M')
     
     md_report = f"# 🚀 Architect's Alpha 情报审计 ({date_display})\n\n"
-    md_report += "> **机制说明**：全源智能去重 | 无更新源自动折叠\n\n"
+    md_report += "> **机制说明**：全源智能去重 | 资金流向优先 | 自动折叠旧源\n\n"
 
     has_content = False
     active_sources_count = 0
@@ -98,24 +101,20 @@ def generate_hot_reports(processors_config):
                 
                 for sector, items in sector_matrix.items():
                     md_report += f"### 🏷️ 板块：{sector}\n"
-                    # 🔥 [修改点] 增加 "标签" 列
-                    md_report += "| 信号强度 | 源头 | 标签 | 关键情报摘要 | 链接 |\n| :--- | :--- | :--- | :--- | :--- |\n"
+                    # 🔥 六列标准表格
+                    md_report += "| 信号 | 资金/热度 | 源头 | 标签 | 关键情报摘要 | 🔗 |\n"
+                    md_report += "| :--- | :--- | :--- | :--- | :--- | :--- |\n"
                     
                     for item in items:
-                        score = int(item.get('score', 0))
-                        source = item.get('user_name', 'Unknown')
-                        text = item.get('full_text', '').replace('\n', ' ')[:85] + "..."
-                        url = item.get('url') or item.get('tweet_url') or '#'
+                        # 🔥 直接读取插件处理好的 display 字段
+                        col_score = item.get('display_score', '-')
+                        col_heat = item.get('display_heat', '-')
+                        col_source = item.get('display_source', 'Unknown')
+                        col_tags = item.get('display_tags', '')
+                        col_text = item.get('display_summary', 'No Content')
+                        col_url = item.get('url', '#')
                         
-                        # 🔥 [修改点] 处理标签显示
-                        tags = item.get('tags', [])
-                        if isinstance(tags, list):
-                            # 最多显示3个标签，防止表格撑爆
-                            tags_display = ", ".join(tags[:3])
-                        else:
-                            tags_display = str(tags) if tags else ""
-                        
-                        md_report += f"| **{score:,}** | {source} | {tags_display} | {text} | [查看]({url}) |\n"
+                        md_report += f"| **{col_score}** | {col_heat} | {col_source} | {col_tags} | {col_text} | [🔗]({col_url}) |\n"
                     md_report += "\n"
             except Exception as e:
                 pass 
@@ -135,12 +134,10 @@ def generate_hot_reports(processors_config):
         print(f"❌ 写入 {report_path} 失败: {e}")
 
 # === 🚜 4. 滚动收割 ===
-
 def perform_grand_harvest(processors_config):
     print("⏰ 触发每日滚动收割...")
     cutoff_date = (datetime.now() - timedelta(days=7))
     cutoff_str = cutoff_date.isoformat()
-    
     try:
         all_reports = private_repo.get_contents("reports")
         for report in all_reports:
@@ -149,20 +146,14 @@ def perform_grand_harvest(processors_config):
             cutoff_date_str = cutoff_date.strftime('%Y%m%d')
             if len(file_date_str) == 8 and file_date_str.isdigit() and file_date_str < cutoff_date_str:
                 private_repo.delete_file(report.path, "🗑️ Cleanup old report", report.sha)
-                print(f"🗑️ 已清理过期报表: {report.name}")
     except: pass
-
     for name, config in processors_config.items():
         table = config["table_name"]
         try:
-            res = supabase.table(table).delete().lt("bj_time", cutoff_str).execute()
-            count = len(res.data) if res.data else 0
-            if count > 0: print(f"🧹 {table}: 已清理 {count} 条过期数据。")
-            else: print(f"ℹ️ {table:<15}: 无过期数据。")
+            supabase.table(table).delete().lt("bj_time", cutoff_str).execute()
         except: pass
 
 # === 🏦 5. 搬运逻辑 ===
-
 def process_and_upload(path, sha, config):
     check = supabase.table("processed_files").select("file_sha").eq("file_sha", sha).execute()
     if check.data: return 0
@@ -191,7 +182,7 @@ def sync_bank_to_sql(processors_config, full_scan=False):
     stats = {name: 0 for name in processors_config.keys()}
     
     if full_scan:
-        print("⚡ [全量模式] 正在地毯式扫描 Central-Bank 所有历史文件...")
+        print("⚡ [全量模式] ...")
         try:
             contents = private_repo.get_contents("")
             while contents:
@@ -225,9 +216,7 @@ if __name__ == "__main__":
     is_full_scan = (os.environ.get("FORCE_FULL_SCAN") == "true")
     sync_bank_to_sql(all_procs, full_scan=is_full_scan)
     generate_hot_reports(all_procs)
-    
     current_hour_utc = datetime.now(timezone.utc).hour
     if (20 <= current_hour_utc <= 22) or (os.environ.get("FORCE_HARVEST")=="true"):
         perform_grand_harvest(all_procs)
-    
     print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ 审计任务圆满完成。")
