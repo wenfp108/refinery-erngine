@@ -1,20 +1,23 @@
 import json
 import math
+import re
 from datetime import datetime, timedelta
 
 TABLE_NAME = "twitter_logs"
-TARGET_TOTAL_QUOTA = 30  # 严格筛选 Top 30
+TARGET_TOTAL_QUOTA = 30 
 
-# === 🛑 1. 政治噪音词 (出现即降权，除非有豁免) ===
-POLITICAL_NOISE = [
+# === 🛑 1. 政治/垃圾噪音词 (核打击) ===
+# 只要出现，分数直接打 1 折
+NOISE_KEYWORDS = [
     "woke", "maga", "democrat", "republican", "leftist", "right wing", "liberal", "conservative",
     "fascist", "communist", "socialist", "pronouns", "dei", "border crisis", "illegal",
     "trump", "biden", "harris", "vance", "pelosi", "schumer", "election", "ballot",
-    "scandal", "epstein", "pedophile", "traitor", "shame", "disgrace", "culture war"
+    "scandal", "epstein", "pedophile", "traitor", "shame", "disgrace", "culture war",
+    "nazi", "hitler", "antisemitism", "zionist", "genocide"
 ]
 
-# === 🔰 2. 宏观豁免词 (保护正经事) ===
-# 即使有 Trump，如果有这些词，也视为高价值情报
+# === 🔰 2. 宏观豁免词 (免死金牌) ===
+# 政治贴里如果有这些词，说明在聊正事，不降权
 MACRO_IMMUNITY = [
     "fed", "federal reserve", "powell", "fomc", "rate", "interest", "cut", "hike",
     "tariff", "trade war", "sanction", "export", "import", "duty",
@@ -25,31 +28,44 @@ MACRO_IMMUNITY = [
     "nominate", "nominee", "appoint", "confirm", "supreme court"
 ]
 
-# === 🧠 3. 话题识别库 (用于打标签 + 核心加分) ===
-TOPIC_KEYWORDS = {
+# === 🧠 3. 精准话题词库 (权重竞价模式) ===
+# 词越长、越专业，权重越高，防止误判
+TOPIC_RULES = {
     "Crypto": [
-        "bitcoin", "btc", "eth", "solana", "defi", "nft", "stablecoin", "etf", "blackrock",
-        "airdrop", "staking", "binance", "coinbase", "satoshi", "vitalik", "wallet"
+        "bitcoin", "btc", "ethereum", "eth", "solana", "defi", "nft", "stablecoin", "usdc", "usdt",
+        "etf flow", "blackrock", "layer2", "zk-rollup", "airdrop", "staking", "restaking", "memecoin",
+        "binance", "coinbase", "satoshi", "vitalik", "on-chain analysis", "wallet", "altcoin"
     ],
     "AI/Tech": [
-        "ai", "llm", "transformer", "inference", "training", "gpt", "claude", "gemini",
-        "nvidia", "gpu", "h100", "cuda", "tsmc", "asml", "chip", "semiconductor",
-        "spacex", "tesla", "fsd", "optimus", "python", "code", "github", "arxiv"
+        "llm", "transformer", "genai", "generative ai", "inference", "training run", "pre-training",
+        "gpt-5", "gpt-4", "claude", "gemini", "llama", "deepseek", "mistral", "anthropic", "openai",
+        "nvidia", "nvda", "h100", "blackwell", "cuda", "gpu", "tpu", "asic", "compute",
+        "tsmc", "asml", "semiconductor", "chip", "wafer", "Moore's law",
+        "spacex", "starship", "falcon", "tesla", "tsla", "fsd", "optimus", "robot",
+        "python", "rust", "github", "huggingface", "arxiv", "open source"
     ],
     "Science": [
-        "nature", "science", "arxiv", "paper", "nasa", "jwst", "supernova", "quantum",
-        "superconductor", "fusion", "crispr", "cancer", "alzheimer", "longevity"
+        "nature journal", "science magazine", "arxiv", "peer review", "preprint",
+        "nasa", "esa", "jwst", "supernova", "exoplanet", "quantum", "entanglement",
+        "superconductor", "lk-99", "fusion energy", "iter", "plasma",
+        "crispr", "mrna", "protein", "enzyme", "cancer research", "alzheimer", "longevity"
     ],
     "Macro": [
-        "sp500", "nasdaq", "bond", "yield", "gold", "oil", "revenue", "earnings",
-        "fed", "rate", "cpi", "inflation", "gdp", "recession", "unemployment", "debt"
+        "sp500", "nasdaq", "bond yield", "treasury", "curve inversion",
+        "gold", "xau", "silver", "crude oil", "brent", "natural gas",
+        "earnings call", "revenue", "guidance", "profit margin", "buyback", "dividend",
+        "fomc", "fed funds", "powell", "cpi", "ppi", "pce", "inflation", "deflation", "stagflation",
+        "gdp", "recession", "soft landing", "non-farm", "unemployment", "jobless", "payroll",
+        "balance sheet", "quantitative tightening", "liquidity injection"
     ],
     "Geo": [
-        "ukraine", "russia", "israel", "iran", "china", "taiwan", "war", "military", "nuclear"
+        "ukraine", "russia", "putin", "zelensky", "donbas", "kursk",
+        "israel", "gaza", "hamas", "hezbollah", "iran", "tehran", "red sea", "houthi",
+        "china", "xi jinping", "taiwan", "south china sea", "pla", "semiconductor sanction",
+        "nato", "pentagon", "dod", "nuclear", "icbm", "drone warfare"
     ]
 }
 
-# === 🛡️ 4. VIP 白名单 (保送机制) ===
 VIP_AUTHORS = [
     "Karpathy", "Yann LeCun", "Vitalik", "Paul Graham", "Naval", 
     "Eric Topol", "Huberman", "Lex Fridman", "Sam Altman", "Kobeissi Letter",
@@ -74,6 +90,11 @@ def process(raw_data, path):
     items = raw_data if isinstance(raw_data, list) else [raw_data]
     refined_results = []
     for i in items:
+        # 垃圾过滤：如果正文太短且没有链接，直接丢弃（杀掉 "Yes..." 这种水贴）
+        text = i.get('fullText', '')
+        if len(text) < 10 and 'http' not in text:
+            continue
+
         user = i.get('user', {})
         metrics = i.get('metrics', {})
         row = {
@@ -81,7 +102,7 @@ def process(raw_data, path):
             "user_name": user.get('name'),
             "screen_name": user.get('screenName'),
             "followers_count": user.get('followersCount'),
-            "full_text": i.get('fullText'),
+            "full_text": text,
             "url": i.get('tweetUrl'), 
             "tags": i.get('tags', []),
             "likes": metrics.get('likes', 0),
@@ -92,38 +113,43 @@ def process(raw_data, path):
         refined_results.append(row)
     return refined_results
 
-# 🔥 核心：上帝权重算法 🔥
+# 🔥 核心：上帝权重算法 2.0 🔥
 def calculate_score_and_tag(item):
     text = (item.get('full_text') or "").lower()
     user = (item.get('user_name') or "")
     
-    # 1. 基础热度 (书签权重最高，代表深度价值)
+    # 1. 基础热度 (书签 x10, 转推 x5, 点赞 x1)
     metrics = item.get('raw_json', {}).get('metrics', {})
-    likes = metrics.get('likes', 0)
-    retweets = metrics.get('retweets', 0)
-    bookmarks = metrics.get('bookmarks', 0)
-    base_score = (retweets * 5) + (bookmarks * 10) + likes
+    base_score = (metrics.get('retweets', 0) * 5) + \
+                 (metrics.get('bookmarks', 0) * 10) + \
+                 metrics.get('likes', 0)
     
-    # 2. 话题识别 & 加权
+    # 2. 话题竞价 (解决分类幻觉)
     detected_topic = "General"
-    is_hardcore = False
+    max_keyword_len = 0 # 匹配到的关键词越长，置信度越高
     
-    for topic, keywords in TOPIC_KEYWORDS.items():
+    for topic, keywords in TOPIC_RULES.items():
         for k in keywords:
+            # 必须是独立单词匹配，防止 "training" 匹配到 "straining" (虽然英文较少见，但逻辑更严谨)
             if k in text:
-                detected_topic = topic
-                is_hardcore = True
-                break
-        if is_hardcore: break
+                # 简单的优先级：如果这个词比之前匹配到的词更长/更具体，就采纳这个分类
+                if len(k) > max_keyword_len:
+                    detected_topic = topic
+                    max_keyword_len = len(k)
     
-    # 硬核话题加分 (Tech, Crypto, Science, Macro)
-    if is_hardcore:
-        base_score += 2000 # 只要沾边硬核，起步分拉高
-        base_score *= 1.5  # 倍率加成
-        
-    # 3. 政治排毒 (逻辑：有噪音且无豁免 -> 降权)
+    # 3. 语义加权 vs 降权
+    if detected_topic != "General":
+        # 命中硬核板块：加分
+        base_score += 2000
+        base_score *= 1.5
+    else:
+        # General 惩罚：如果是水贴，分数打对折
+        # 除非它是超级大热点，否则别想挤掉硬核内容
+        base_score *= 0.5 
+
+    # 4. 政治排毒
     has_noise = False
-    for noise in POLITICAL_NOISE:
+    for noise in NOISE_KEYWORDS:
         if noise in text:
             has_noise = True
             break
@@ -135,10 +161,10 @@ def calculate_score_and_tag(item):
                 is_immune = True
                 break
         if not is_immune:
-            base_score *= 0.1 # 降权打击
-            detected_topic = "Politics" # 强制标记为政治
+            base_score *= 0.1 # 核打击
+            detected_topic = "Politics" # 强制标记
             
-    # 4. VIP 加成
+    # 5. VIP 加成
     for vip in VIP_AUTHORS:
         if vip.lower() in user.lower():
             base_score += 5000
@@ -155,7 +181,6 @@ def get_hot_items(supabase, table_name):
 
     if not all_tweets: return {}
 
-    # 1. URL 去重
     unique_map = {}
     for t in all_tweets:
         key = t.get('url') or (t.get('user_name'), t.get('full_text'))
@@ -163,7 +188,6 @@ def get_hot_items(supabase, table_name):
             unique_map[key] = t
     tweets = list(unique_map.values())
 
-    # 2. 算分 & 打标
     scored_tweets = []
     for t in tweets:
         score, topic = calculate_score_and_tag(t)
@@ -171,11 +195,9 @@ def get_hot_items(supabase, table_name):
         t['_topic'] = topic
         scored_tweets.append(t)
         
-    # 3. 全局排序
     scored_tweets.sort(key=lambda x: x['_score'], reverse=True)
     
-    # 4. 🛡️ 熔断机制 (Diversity Breaker) 🛡️
-    # 应对大数据量的关键：防止同一个人霸榜
+    # 🛡️ 多样性熔断 (每人最多 3 条)
     final_list = []
     author_counts = {}
     
@@ -184,26 +206,29 @@ def get_hot_items(supabase, table_name):
             break
             
         author = t['user_name']
-        # 限制每个博主最多 3 条
         if author_counts.get(author, 0) >= 3:
-            continue 
+            continue
             
         final_list.append(t)
         author_counts[author] = author_counts.get(author, 0) + 1
         
-    # 5. 生成单张大表
+    # 生成大表
     header = "| 信号 | 🏷️ 标签 | 热度 | 博主 | 摘要 | 🔗 |\n| :--- | :--- | :--- | :--- | :--- | :--- |"
     rows = []
     
     for t in final_list:
         score_display = fmt_k(t['_score'])
-        topic_display = f"`{t['_topic']}`" # 代码块样式
+        
+        # 标签美化
+        topic_raw = t['_topic']
+        if topic_raw == "General": topic_str = "General" # 不加粗
+        else: topic_str = f"**{topic_raw}**" # 硬核标签加粗
         
         heat = f"❤️ {fmt_k(t.get('likes',0))}<br>🔁 {fmt_k(t.get('retweets',0))}" 
         user = t['user_name']
         text = t['full_text'].replace('\n', ' ')[:70] + "..."
         url = t['url']
         
-        rows.append(f"| **{score_display}** | {topic_display} | {heat} | {user} | {text} | [🔗]({url}) |")
+        rows.append(f"| **{score_display}** | {topic_str} | {heat} | {user} | {text} | [🔗]({url}) |")
 
     return {"🏆 全域精选 (Top 30)": {"header": header, "rows": rows}}
