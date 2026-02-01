@@ -4,17 +4,41 @@ from datetime import datetime, timedelta
 
 TABLE_NAME = "twitter_logs"
 
-# 优先级顺序：Politics 最后，防止吞掉跨界推文
-SECTORS = [
-    "Geopolitics", 
-    "Science", 
-    "Tech", 
-    "Finance", 
-    "Crypto", 
-    "Economy", 
-    "Politics" 
-]
+# === 🧠 1. 语义切分配置 (Semantic Router) ===
+KEYWORD_RULES = {
+    "Crypto": [
+        "bitcoin", "btc", "$btc", "eth", "ethereum", "$eth", "solana", "$sol",
+        "crypto", "token", "wallet", "defi", "nft", "memecoin", "altcoin",
+        "binance", "coinbase", "fud", "fomo", "pump", "bull", "bear"
+    ],
+    "Tech": [
+        "ai", "gpt", "llm", "openai", "nvidia", "$nvda", "gpu", "chip", "tsmc",
+        "musk", "tesla", "$tsla", "spacex", "apple", "google", "meta",
+        "robot", "code", "software", "saas", "cyber"
+    ],
+    "Science": [
+        "science", "research", "study", "paper", "nature", "nasa", "space", 
+        "biology", "biotech", "gene", "cancer", "medical", "physics", "quantum", "energy"
+    ],
+    "Geopolitics": [
+        "war", "military", "conflict", "nuclear", "china", "russia", "ukraine", 
+        "israel", "iran", "taiwan", "sanction", "nato", "un", "diplomacy"
+    ],
+    "Finance": [
+        "stock", "market", "sp500", "nasdaq", "bond", "yield", "gold", "silver", "oil",
+        "trading", "invest", "long", "short", "hedge", "etf", "earnings", "revenue"
+    ],
+    "Economy": [
+        "inflation", "cpi", "ppi", "recession", "fed", "powell", "rate", "cut", "hike",
+        "gdp", "job", "employment", "unemployment", "debt", "stimulus", "tax"
+    ],
+    "Politics": [
+        "trump", "biden", "harris", "president", "election", "vote", "poll",
+        "congress", "senate", "house", "bill", "law", "democrat", "republican"
+    ]
+}
 
+SECTORS = list(KEYWORD_RULES.keys())
 TARGET_TOTAL_QUOTA = 30 
 
 def fmt_k(num):
@@ -67,6 +91,22 @@ def calculate_twitter_score(item):
     synergy = 1 + (len(item.get('tags', [])) * 0.3)
     return (base + growth) * synergy
 
+# 🔥 智能分类器
+def detect_sector(item):
+    text = (item.get('full_text') or "").lower()
+    user = (item.get('user_name') or "").lower()
+    content_corpus = f"{text} {user}"
+    
+    # 1. 关键词优先
+    for sector, keywords in KEYWORD_RULES.items():
+        for k in keywords:
+            if k in content_corpus: return sector
+    
+    # 2. 原标签兜底
+    for tag in item.get('tags', []):
+        if tag in KEYWORD_RULES: return tag
+    return None
+
 def get_hot_items(supabase, table_name):
     yesterday = (datetime.now() - timedelta(hours=24)).isoformat()
     try:
@@ -75,10 +115,8 @@ def get_hot_items(supabase, table_name):
     except Exception as e: return {}
 
     if not all_tweets: return {}
-
     for t in all_tweets: t['_score'] = calculate_twitter_score(t)
 
-    # 1. URL 去重
     unique_map = {}
     for t in all_tweets:
         key = t.get('url') or (t.get('user_name'), t.get('full_text'))
@@ -87,39 +125,29 @@ def get_hot_items(supabase, table_name):
     deduplicated = list(unique_map.values())
     total = len(deduplicated)
 
-    # 2. 独占分配逻辑
+    # 智能分配
     sector_pools = {s: [] for s in SECTORS}
     for t in deduplicated:
-        tags = t.get('tags', [])
-        for sector in SECTORS:
-            if sector in tags:
-                sector_pools[sector].append(t)
-                break 
-
+        target = detect_sector(t)
+        if target and target in sector_pools:
+            sector_pools[target].append(t)
+    
     intelligence_matrix = {}
     for sector, pool in sector_pools.items():
         if not pool: continue
-        
         pool.sort(key=lambda x: x['_score'], reverse=True)
         quota = max(3, math.ceil((len(pool) / total) * TARGET_TOTAL_QUOTA))
         
-        # 🔥 修改点：表头改为“互动”，内容显示点赞和转推 🔥
-        header = "| 信号 | 互动 (❤️/🔁) | 博主 | 摘要 | 🔗 |\n| :--- | :--- | :--- | :--- | :--- |"
+        # 🔥 UI 美化：垂直排版
+        header = "| 信号 | 热度指标 | 博主 | 摘要 | 🔗 |\n| :--- | :--- | :--- | :--- | :--- |"
         rows = []
         for t in pool[:quota]:
             score = fmt_k(t['_score'])
-            
-            # 提取点赞和转推
-            likes = fmt_k(t.get('likes', 0))
-            rts = fmt_k(t.get('retweets', 0))
-            # 组合显示
-            heat_display = f"❤️{likes} 🔁{rts}"
-            
+            heat = f"❤️ {fmt_k(t.get('likes',0))}<br>🔁 {fmt_k(t.get('retweets',0))}" 
             user = t['user_name']
-            text = t['full_text'].replace('\n', ' ')[:60] + "..."
+            text = t['full_text'].replace('\n', ' ')[:80] + "..."
             url = t['url']
-            
-            rows.append(f"| **{score}** | {heat_display} | {user} | {text} | [🔗]({url}) |")
+            rows.append(f"| **{score}** | {heat} | {user} | {text} | [🔗]({url}) |")
         
         intelligence_matrix[sector] = {"header": header, "rows": rows}
 
