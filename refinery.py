@@ -61,17 +61,14 @@ def get_data_freshness(table_name):
         
         return (minutes_ago <= 65, minutes_ago, last_time.strftime('%H:%M'))
     except Exception as e:
-        print(f"⚠️ 新鲜度检查失败 ({table_name}): {e}")
         return (True, 0, "CheckError")
 
-# === 🔥 3. 战报工厂：Markdown 垂直堆叠引擎 ===
+# === 🔥 3. 战报工厂 ===
 
 def generate_hot_reports(processors_config):
-    print("\n🔥 [情报对冲] 正在生成 Markdown 时报...")
+    # print("\n🔥 [情报对冲] 正在生成 Markdown 时报...") # 日志简化，这行可注释
     bj_now = datetime.now(timezone(timedelta(hours=8)))
     
-    # 🔥 [修改点 1] 自定义文件名格式: 2026-02-01-14.md
-    # 使用中划线分隔，方便阅读
     file_name = bj_now.strftime('%Y-%m-%d-%H') + ".md"
     report_path = f"reports/{file_name}"
     
@@ -88,13 +85,11 @@ def generate_hot_reports(processors_config):
                 table = config["table_name"]
                 is_fresh, mins_ago, last_update_time = get_data_freshness(table)
                 
-                # 睡眠模式
                 if not is_fresh:
                     md_report += f"## 💤 来源：{source_name.upper()} (上次更新: {last_update_time})\n"
                     md_report += f"> *距上次更新已过 {int(mins_ago/60)} 小时，暂无新数据。*\n\n"
                     continue 
 
-                # 唤醒模式
                 sector_matrix = config["module"].get_hot_items(supabase, table)
                 if not sector_matrix: continue
 
@@ -110,65 +105,99 @@ def generate_hot_reports(processors_config):
                         source = item.get('user_name', 'Unknown')
                         text = item.get('full_text', '').replace('\n', ' ')[:85] + "..."
                         url = item.get('url') or item.get('tweet_url') or '#'
-                        
                         md_report += f"| **{score:,}** | {source} | {text} | [查看]({url}) |\n"
                     md_report += "\n"
             except Exception as e:
-                print(f"⚠️ {source_name} 渲染异常: {e}")
+                pass # 静默失败，保持日志整洁
 
     if not has_content:
         md_report += "\n\n**🛑 本轮扫描全域静默，请查阅历史归档。**"
 
-    # 🔥 [修改点 2] 只写入您指定的这一个文件，不再写 latest_brief.md
     try:
         try:
             old = private_repo.get_contents(report_path)
             private_repo.update_file(old.path, f"📊 Update: {file_name}", md_report, old.sha)
-            print(f"✅ 更新战报: {report_path}")
+            # print(f"✅ 更新战报: {report_path}") # 日志简化
         except:
             private_repo.create_file(report_path, f"🚀 New: {file_name}", md_report)
-            print(f"✅ 创建战报: {report_path}")
-    except Exception as e: print(f"❌ 写入 {report_path} 失败: {e}")
+            # print(f"✅ 创建战报: {report_path}") # 日志简化
+    except Exception as e: 
+        print(f"❌ 写入 {report_path} 失败: {e}")
 
-# === 🏦 5. 搬运逻辑 (支持全量补录) ===
+# === 🚜 4. 滚动收割 (定制日志版) ===
+
+def perform_grand_harvest(processors_config):
+    print("⏰ 触发每日滚动收割 (检查过期数据)...")
+    
+    cutoff_date = (datetime.now() - timedelta(days=7))
+    cutoff_str = cutoff_date.isoformat()
+    print(f"🚜 [滚动收割] 启动... 检查 7 天前 ({cutoff_date.strftime('%Y-%m-%d %H:%M')} 之前) 的数据")
+
+    # A. 清理报表 (静默处理，除非有删除)
+    try:
+        all_reports = private_repo.get_contents("reports")
+        for report in all_reports:
+            if not report.name.endswith(".md"): continue
+            file_date_str = report.name[:10].replace('-', '')
+            cutoff_date_str = cutoff_date.strftime('%Y%m%d')
+            
+            if file_date_str.isdigit() and file_date_str < cutoff_date_str:
+                private_repo.delete_file(report.path, "🗑️ Cleanup old report", report.sha)
+                print(f"🗑️ 已清理过期报表: {report.name}")
+    except: pass
+
+    # B. SQL 数据归档 (定制日志)
+    for name, config in processors_config.items():
+        table = config["table_name"]
+        try:
+            # 尝试删除并返回计数
+            res = supabase.table(table).delete().lt("bj_time", cutoff_str).execute()
+            count = len(res.data) if res.data else 0
+            
+            if count > 0:
+                print(f"🧹 {table}: 已清理 {count} 条过期数据。")
+            else:
+                print(f"ℹ️ {table}: 未找到 7 天前数据 (所有数据均为最新)。")
+        except Exception as e: 
+            print(f"ℹ️ {table}: 未找到 7 天前数据 (或表结构不支持)。")
+
+# === 🏦 5. 搬运逻辑 (静默版) ===
 
 def process_and_upload(path, sha, config):
-    # 查重：如果文件已处理，秒退
     check = supabase.table("processed_files").select("file_sha").eq("file_sha", sha).execute()
-    if check.data: return False 
+    if check.data: return 0
     
-    print(f"📥 正在处理: {path} ...")
+    # print(f"📥 正在处理: {path} ...") # 注释掉，保持日志清爽
     try:
         content_file = private_repo.get_contents(path)
         raw_data = json.loads(base64.b64decode(content_file.content).decode('utf-8'))
         
         items = config["module"].process(raw_data, path)
+        count = len(items) if items else 0
+        
         if items:
-            # 批量插入
             for i in range(0, len(items), 500):
                 supabase.table(config["table_name"]).insert(items[i : i+500]).execute()
-            
-            # 标记已处理
             supabase.table("processed_files").upsert({
                 "file_sha": sha, 
                 "file_path": path,
                 "engine": config.get("table_name", "unknown").split('_')[0],
-                "item_count": len(items)
+                "item_count": count
             }).execute()
-            return True
-    except Exception as e: 
-        print(f"⚠️ 解析失败 {path}: {e}")
-    return False
+            return count
+    except Exception as e: pass
+    return 0
 
 def sync_bank_to_sql(processors_config, full_scan=False):
-    """
-    双模式同步：
-    - full_scan=True: 地毯式扫描整个仓库 (递归遍历)
-    - full_scan=False: 只看过去 24h 提交 (快)
-    """
+    # 1. 打印带时间的标头
+    current_time = datetime.now().strftime('%H:%M:%S')
+    print(f"[{current_time}] 🏦 巡检开始: 1小时增量提取")
+    
+    # 初始化计数器
+    stats = {name: 0 for name in processors_config.keys()}
+    
     if full_scan:
-        # 🔥 [修改点 3] 真正的递归全量扫描逻辑
-        print("\n🚜 [全量模式] 正在地毯式扫描 Central-Bank 所有历史文件...")
+        # print("🚜 [全量模式] ...") # 静默
         try:
             contents = private_repo.get_contents("")
             while contents:
@@ -176,15 +205,14 @@ def sync_bank_to_sql(processors_config, full_scan=False):
                 if file_content.type == "dir":
                     contents.extend(private_repo.get_contents(file_content.path))
                 elif file_content.name.endswith(".json"):
-                    # 找到 JSON，判断属于哪个插件
-                    source_key = file_content.path.split('/')[0] # twitter, polymarket...
+                    source_key = file_content.path.split('/')[0]
                     if source_key in processors_config:
-                        process_and_upload(file_content.path, file_content.sha, processors_config[source_key])
-        except Exception as e:
-            print(f"❌ 全量扫描中断: {e}")
+                        added = process_and_upload(file_content.path, file_content.sha, processors_config[source_key])
+                        stats[source_key] += added
+        except Exception as e: print(f"❌ Scan Error: {e}")
             
     else:
-        print("\n⚡ [增量模式] 正在检查过去 24h 的提交...")
+        # print("⚡ [增量模式] ...") # 静默
         since = datetime.now(timezone.utc) - timedelta(hours=24)
         commits = private_repo.get_commits(since=since)
         for commit in commits:
@@ -192,19 +220,33 @@ def sync_bank_to_sql(processors_config, full_scan=False):
                 if f.filename.endswith('.json'):
                     source_key = f.filename.split('/')[0]
                     if source_key in processors_config:
-                        process_and_upload(f.filename, f.sha, processors_config[source_key])
+                        added = process_and_upload(f.filename, f.sha, processors_config[source_key])
+                        stats[source_key] += added
+
+    # 2. 打印格式化看板
+    # 格式：✅ twitter     | 现状：发现新动态 (+79)
+    for source, count in stats.items():
+        # 对齐填充: source名补齐到 12 字符
+        source_display = f"{source:<12}"
+        if count > 0:
+            print(f"✅ {source_display} | 现状：发现新动态 (+{count})")
+        else:
+            print(f"➖ {source_display} | 现状：无新文件变动 (+0)")
 
 # === 🚀 6. 执行入口 ===
 if __name__ == "__main__":
     all_procs = get_all_processors()
     
-    # 检查环境变量 FORCE_FULL_SCAN 是否为 true
     is_full_scan = (os.environ.get("FORCE_FULL_SCAN") == "true")
     
-    # 1. 同步数据
+    # 1. 同步 (输出巡检日志)
     sync_bank_to_sql(all_procs, full_scan=is_full_scan)
     
-    # 2. 生成战报
+    # 2. 战报 (静默生成)
     generate_hot_reports(all_procs)
     
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] ✅ 审计任务完成。")
+    # 3. 归档 (输出收割日志)
+    # 每天凌晨 4 点 (UTC 20点) 运行，或者强制运行
+    current_hour_utc = datetime.now(timezone.utc).hour
+    if (20 <= current_hour_utc <= 22) or (os.environ.get("FORCE_HARVEST")=="true"):
+        perform_grand_harvest(all_procs)
