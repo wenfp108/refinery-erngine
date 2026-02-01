@@ -1,0 +1,29 @@
+name: 🚀 Refinery Engine (Hourly)
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # 每小时第0分钟触发 (UTC时间，对应北京时间整点)
+  workflow_dispatch:      # 允许手动按钮触发
+
+jobs:
+  refine:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Refinery
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          FORCE_REPORT: 'true' # 强制生成报告(配合代码里的逻辑)
+        run: python refinery.py
