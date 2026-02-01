@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 TABLE_NAME = "polymarket_logs"
 RADAR_TARGET_TOTAL = 50  
 
-# 🎨 数字美化
+# 🎨 美化工具：将数字转为 K/M/B/T
 def fmt_k(num, prefix=""):
     if not num: return "-"
     try: n = float(num)
@@ -16,9 +16,7 @@ def fmt_k(num, prefix=""):
     if n >= 1_000: return f"{prefix}{n/1_000:.1f}K"
     return f"{prefix}{int(n)}"
 
-# ... (to_bj_time, parse_num, process 函数与之前一致，直接复制即可，节省篇幅) ...
-# 请确保保留强制刷新时间的 process 函数
-
+# 数据解析
 def to_bj_time(utc_str):
     if not utc_str: return None
     try:
@@ -38,7 +36,10 @@ def process(raw_data, path):
     if isinstance(raw_data, dict) and "items" in raw_data: items = raw_data["items"]
     elif isinstance(raw_data, list): items = raw_data
     else: items = [raw_data]
+    
+    # 强制刷新时间戳
     force_now_time = (datetime.utcnow() + timedelta(hours=8)).isoformat()
+    
     for item in items:
         entry = {
             "bj_time": force_now_time,
@@ -70,11 +71,20 @@ def calculate_score(item):
     if 'TAIL_RISK' in tags: score *= 50
     return score
 
+# 🔥 [修正] 修复了 f-string 不能包含反斜杠的错误
 def get_win_rate_str(price_str):
     try:
-        if "Yes:" in price_str: return f"Yes {float(price_str.split('Yes:')[1].split('%')[0]):.0f}%"
-        if "Up:" in price_str: return f"Up {float(price_str.split('Up:')[1].split('%')[0]):.0f}%"
-        if "{" in price_str: return f"{float(json.loads(price_str.replace(\"'\", '\"')))*100:.0f}%"
+        if "Yes:" in price_str: 
+            val = float(price_str.split('Yes:')[1].split('%')[0])
+            return f"Yes {val:.0f}%"
+        if "Up:" in price_str: 
+            val = float(price_str.split('Up:')[1].split('%')[0])
+            return f"Up {val:.0f}%"
+        if "{" in price_str:
+            # 先处理字符串，不放在 f-string 里
+            clean_json = price_str.replace("'", '"')
+            val = float(json.loads(clean_json)) * 100
+            return f"{val:.0f}%"
     except: pass
     return str(price_str)[:15]
 
@@ -103,36 +113,35 @@ def get_hot_items(supabase, table_name):
             final.extend(rows[:2])
         return final
 
-    # 🔥🔥 核心：在这里定义 8 列超宽表格 🔥🔥
-    def build_markdown(items):
-        # 1. 定义表头
-        header = "| 信号 | 标题 | 问题 | Prices | Vol | Liq | 24h | Tags |\n| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
-        
-        rows = []
+    def build_display(items):
+        res = []
         for i in items:
-            # 2. 组装数据
-            signal = fmt_k(i['_temp_score'])
-            title = str(i.get('title', '-'))[:20].replace('|', '') # 防止破表
-            # 问题带链接
-            q_text = str(i.get('question', '-'))[:40].replace('|', '') + "..."
-            question = f"[{q_text}](https://polymarket.com/event/{i['slug']})"
-            
-            prices = get_win_rate_str(i['prices'])
-            vol = fmt_k(i.get('volume', 0), '$')
-            liq = fmt_k(i.get('liquidity', 0), '$')
-            v24 = fmt_k(i.get('vol24h', 0), '$')
-            tags = ", ".join(i.get('strategy_tags', []))[:15]
+            metrics = []
+            if i.get('volume'): metrics.append(f"V:{fmt_k(i['volume'], '$')}")
+            if i.get('liquidity'): metrics.append(f"L:{fmt_k(i['liquidity'], '$')}")
+            if i.get('vol24h'): metrics.append(f"24h:{fmt_k(i['vol24h'], '$')}")
+            heat_str = "<br>".join(metrics) 
 
-            # 3. 拼接 Markdown 行
-            row = f"| **{signal}** | {title} | {question} | {prices} | {vol} | {liq} | {v24} | {tags} |"
-            rows.append(row)
-            
-        return {"header": header, "rows": rows}
+            prob_str = get_win_rate_str(i['prices'])
+
+            t = str(i.get('title', '')).strip()
+            q = str(i.get('question', '')).strip()
+            summary_str = f"**{t}**<br>{q}"
+
+            res.append({
+                "display_score": fmt_k(i['_temp_score']),
+                "display_heat": heat_str,
+                "display_source": prob_str,
+                "display_tags": ", ".join(i.get('strategy_tags', []))[:20],
+                "display_summary": summary_str,
+                "url": f"https://polymarket.com/event/{i['slug']}"
+            })
+        return res
 
     if sniper_pool:
         refined = anti_flood_filter(sniper_pool)
         refined.sort(key=lambda x: x['_temp_score'], reverse=True)
-        sector_matrix["🎯 SNIPER (核心监控)"] = build_markdown(refined)
+        sector_matrix["🎯 SNIPER (核心监控)"] = build_display(refined)
 
     SECTORS_LIST = ["Politics", "Geopolitics", "Science", "Tech", "Finance", "Crypto", "Economy"]
     MAP = {'POLITICS': 'Politics', 'GEOPOLITICS': 'Geopolitics', 'TECH': 'Tech', 'FINANCE': 'Finance', 'CRYPTO': 'Crypto'}
@@ -143,6 +152,6 @@ def get_hot_items(supabase, table_name):
             refined = anti_flood_filter(pool)
             refined.sort(key=lambda x: x['_temp_score'], reverse=True)
             quota = max(3, math.ceil((len(pool) / len(radar_pool)) * RADAR_TARGET_TOTAL))
-            sector_matrix[s] = build_markdown(refined[:quota])
+            sector_matrix[s] = build_display(refined[:quota])
 
     return sector_matrix
