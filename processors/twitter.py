@@ -253,7 +253,7 @@ def get_hot_items(supabase, table_name):
         else: 
             topic_str = f"**{topic_raw}**"
         
-        heat = f"❤️ {fmt_k(t.get('likes',0))}<br>🔁 {fmt_k(t.get('retweets',0))}" 
+        heat = f"🔁 {fmt_k(t.get('retweets',0))}<br>🔖 {fmt_k(t.get('bookmarks',0))}"
         user = t['user_name']
         text = t['full_text'].replace('\n', ' ')[:70] + "..."
         url = t.get('url', '#')
