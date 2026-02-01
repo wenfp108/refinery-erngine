@@ -1,6 +1,6 @@
 import os, json, base64, requests, importlib.util, sys
-import pandas as pd # ✅ 新增
-import io # ✅ 新增
+import pandas as pd  # 📦 核心组件：数据处理
+import io            # 📦 核心组件：内存文件流
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
 from github import Github, Auth
@@ -110,7 +110,7 @@ def generate_hot_reports(processors_config):
                         if "rows" in data and isinstance(data["rows"], list):
                             for row in data["rows"]: md_report += row + "\n"
                     
-                    # 兼容旧版列表格式 (防止 GitHub 等未更新插件报错)
+                    # 兼容旧版列表格式
                     elif isinstance(data, list):
                         md_report += "| 信号 | 内容 | 🔗 |\n| :--- | :--- | :--- |\n"
                         for item in data:
@@ -135,7 +135,7 @@ def generate_hot_reports(processors_config):
     except Exception as e: 
         print(f"❌ 写入 {report_path} 失败: {e}")
 
-# === 🚜 4. 滚动收割 (修复版：先归档，后删除) ===
+# === 🚜 4. 滚动收割 (安全归档版) ===
 def perform_grand_harvest(processors_config):
     print("⏰ 触发每日滚动收割 (Archive & Purge)...")
     
@@ -144,7 +144,7 @@ def perform_grand_harvest(processors_config):
     cutoff_str = cutoff_date.isoformat()
     date_tag = cutoff_date.strftime('%Y%m%d')
 
-    # 1. 清理旧战报 (保持不变)
+    # 1. 清理旧战报 (文件系统清理)
     try:
         all_reports = private_repo.get_contents("reports")
         for report in all_reports:
@@ -155,63 +155,61 @@ def perform_grand_harvest(processors_config):
                 private_repo.delete_file(report.path, "🗑️ Cleanup old report", report.sha)
     except Exception as e: pass
 
-    # 2. 核心修复：归档数据到 Parquet
+    # 2. 核心逻辑：安全归档 + 原子删除
     for name, config in processors_config.items():
         table = config["table_name"]
         print(f"📦 正在处理表: {table} ...")
         
         try:
-            # A. 捞出即将被删除的数据
-            # Supabase 默认一次取 1000 条，如果数据量大可能需要分页，但作为每日归档通常够用
+            # A. 捞出即将被删除的数据 (Limit 默认 1000)
             res = supabase.table(table).select("*").lt("bj_time", cutoff_str).execute()
             data = res.data
             
             if not data:
-                print(f"   - {table}: 无过期数据，跳过归档。")
+                print(f"   - {table}: 无过期数据，无需操作。")
                 continue
                 
-            # B. 转换为 Parquet (这是最关键的一步)
+            # B. 转换为 Parquet (金库砖块)
             df = pd.DataFrame(data)
             buffer = io.BytesIO()
             df.to_parquet(buffer, index=False, engine='pyarrow', compression='snappy')
             content_bytes = buffer.getvalue()
             
             # C. 上传到 Central Bank 的 archive 目录
-            # 路径示例: archive/2026/02/twitter_logs_20260201.parquet
+            # 为了防止文件名冲突覆盖，加上时间戳甚至小时
             year_month = cutoff_date.strftime('%Y/%m')
-            archive_path = f"archive/{year_month}/{table}_{date_tag}.parquet"
+            hour_tag = datetime.now().strftime('%H%M%S') 
+            archive_path = f"archive/{year_month}/{table}_{date_tag}_{hour_tag}.parquet"
             
             try:
-                # 尝试创建文件
                 private_repo.create_file(
                     path=archive_path,
-                    message=f"🏛️ Archive: {table} data for {date_tag}",
+                    message=f"🏛️ Archive: {table} data batch",
                     content=content_bytes,
                     branch="main" 
                 )
                 print(f"   ✅ 已归档: {archive_path} ({len(data)} rows)")
             except Exception as e:
-                # 如果文件已存在 (比如重跑任务)，则更新它
-                if "422" in str(e) or "already exists" in str(e):
-                    old_file = private_repo.get_contents(archive_path)
-                    private_repo.update_file(
-                        path=archive_path,
-                        message=f"🏛️ Update Archive: {table} data",
-                        content=content_bytes,
-                        sha=old_file.sha
-                    )
-                    print(f"   ✅ 已更新归档: {archive_path}")
-                else:
-                    print(f"   ❌ 归档上传失败: {e}")
-                    continue # 上传失败就不要删除数据！直接跳过
+                print(f"   ❌ 归档上传失败: {e}")
+                # 🚨 熔断：上传失败直接跳过删除，保护数据！
+                continue 
             
-            # D. 确认归档成功后，执行删除 (Safe Delete)
-            supabase.table(table).delete().lt("bj_time", cutoff_str).execute()
-            print(f"   🗑️ 已从数据库清理 {len(data)} 条旧数据")
+            # D. 安全删除：只删除已归档的 ID (原子性保证)
+            # 提取出刚刚成功归档的那批 ID
+            archived_ids = [item['id'] for item in data if 'id' in item]
+            
+            if archived_ids:
+                # 分批删除，防止 ID 列表过长
+                batch_size = 500
+                for i in range(0, len(archived_ids), batch_size):
+                    batch = archived_ids[i : i + batch_size]
+                    supabase.table(table).delete().in_("id", batch).execute()
+                print(f"   🗑️ 已安全核销 {len(archived_ids)} 条数据")
+            else:
+                print("   ⚠️ 数据无 ID 字段，跳过删除以防误判。")
 
         except Exception as e:
             print(f"⚠️ 处理表 {table} 时发生异常: {e}")
-            # 发生任何错误都不执行删除，确保数据安全
             pass
 
 # === 🏦 5. 搬运逻辑 ===
