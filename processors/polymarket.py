@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 TABLE_NAME = "polymarket_logs"
 RADAR_TARGET_TOTAL = 50  
 
-# 🎨 美化工具：将数字转为 K/M/B/T
 def fmt_k(num, prefix=""):
     if not num: return "-"
     try: n = float(num)
@@ -16,7 +15,6 @@ def fmt_k(num, prefix=""):
     if n >= 1_000: return f"{prefix}{n/1_000:.1f}K"
     return f"{prefix}{int(n)}"
 
-# 数据解析
 def to_bj_time(utc_str):
     if not utc_str: return None
     try:
@@ -37,7 +35,6 @@ def process(raw_data, path):
     elif isinstance(raw_data, list): items = raw_data
     else: items = [raw_data]
     
-    # 强制刷新时间戳
     force_now_time = (datetime.utcnow() + timedelta(hours=8)).isoformat()
     
     for item in items:
@@ -71,7 +68,7 @@ def calculate_score(item):
     if 'TAIL_RISK' in tags: score *= 50
     return score
 
-# 🔥 [修正] 修复了 f-string 不能包含反斜杠的错误
+# 🔥 修复：将复杂逻辑移出 f-string，防止 SyntaxError
 def get_win_rate_str(price_str):
     try:
         if "Yes:" in price_str: 
@@ -81,7 +78,6 @@ def get_win_rate_str(price_str):
             val = float(price_str.split('Up:')[1].split('%')[0])
             return f"Up {val:.0f}%"
         if "{" in price_str:
-            # 先处理字符串，不放在 f-string 里
             clean_json = price_str.replace("'", '"')
             val = float(json.loads(clean_json)) * 100
             return f"{val:.0f}%"
@@ -113,35 +109,27 @@ def get_hot_items(supabase, table_name):
             final.extend(rows[:2])
         return final
 
-    def build_display(items):
-        res = []
+    def build_markdown(items):
+        header = "| 信号 | 标题 | 问题 | Prices | Vol | Liq | 24h | Tags |\n| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+        rows = []
         for i in items:
-            metrics = []
-            if i.get('volume'): metrics.append(f"V:{fmt_k(i['volume'], '$')}")
-            if i.get('liquidity'): metrics.append(f"L:{fmt_k(i['liquidity'], '$')}")
-            if i.get('vol24h'): metrics.append(f"24h:{fmt_k(i['vol24h'], '$')}")
-            heat_str = "<br>".join(metrics) 
-
-            prob_str = get_win_rate_str(i['prices'])
-
-            t = str(i.get('title', '')).strip()
-            q = str(i.get('question', '')).strip()
-            summary_str = f"**{t}**<br>{q}"
-
-            res.append({
-                "display_score": fmt_k(i['_temp_score']),
-                "display_heat": heat_str,
-                "display_source": prob_str,
-                "display_tags": ", ".join(i.get('strategy_tags', []))[:20],
-                "display_summary": summary_str,
-                "url": f"https://polymarket.com/event/{i['slug']}"
-            })
-        return res
+            signal = fmt_k(i['_temp_score'])
+            title = str(i.get('title', '-'))[:20].replace('|', '') 
+            q_text = str(i.get('question', '-'))[:40].replace('|', '') + "..."
+            question = f"[{q_text}](https://polymarket.com/event/{i['slug']})"
+            prices = get_win_rate_str(i['prices'])
+            vol = fmt_k(i.get('volume', 0), '$')
+            liq = fmt_k(i.get('liquidity', 0), '$')
+            v24 = fmt_k(i.get('vol24h', 0), '$')
+            tags = ", ".join(i.get('strategy_tags', []))[:15]
+            row = f"| **{signal}** | {title} | {question} | {prices} | {vol} | {liq} | {v24} | {tags} |"
+            rows.append(row)
+        return {"header": header, "rows": rows}
 
     if sniper_pool:
         refined = anti_flood_filter(sniper_pool)
         refined.sort(key=lambda x: x['_temp_score'], reverse=True)
-        sector_matrix["🎯 SNIPER (核心监控)"] = build_display(refined)
+        sector_matrix["🎯 SNIPER (核心监控)"] = build_markdown(refined)
 
     SECTORS_LIST = ["Politics", "Geopolitics", "Science", "Tech", "Finance", "Crypto", "Economy"]
     MAP = {'POLITICS': 'Politics', 'GEOPOLITICS': 'Geopolitics', 'TECH': 'Tech', 'FINANCE': 'Finance', 'CRYPTO': 'Crypto'}
@@ -152,6 +140,6 @@ def get_hot_items(supabase, table_name):
             refined = anti_flood_filter(pool)
             refined.sort(key=lambda x: x['_temp_score'], reverse=True)
             quota = max(3, math.ceil((len(pool) / len(radar_pool)) * RADAR_TARGET_TOTAL))
-            sector_matrix[s] = build_display(refined[:quota])
+            sector_matrix[s] = build_markdown(refined[:quota])
 
     return sector_matrix
