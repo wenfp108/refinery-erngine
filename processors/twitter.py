@@ -6,10 +6,20 @@ from datetime import datetime, timedelta
 TABLE_NAME = "twitter_logs"
 ARCHIVE_FOLDER = "twitter"
 
+# ⚠️ 注意：这个列表的顺序决定了归类的优先级
+# 例如：一条推文同时有 Politics 和 Tech，它会优先进入 Politics 板块
 SECTORS = ["Politics", "Geopolitics", "Science", "Tech", "Finance", "Crypto", "Economy"]
-TARGET_TOTAL_QUOTA = 30  # 基准总配额
+TARGET_TOTAL_QUOTA = 30 
 
 # === 🛠️ 2. 数据清洗 (入库) ===
+def fmt_k(num):
+    if not num: return "-"
+    try: n = float(num)
+    except: return "-"
+    if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+    if n >= 1_000: return f"{n/1_000:.1f}K"
+    return str(int(n))
+
 def to_iso_bj(date_str):
     try:
         utc_dt = datetime.strptime(date_str, '%a %b %d %H:%M:%S +0000 %Y')
@@ -73,7 +83,7 @@ def calculate_twitter_score(item):
     
     return (base_interaction + growth_momentum) * synergy_boost
 
-# === 📤 4. 战报生成 (含去重算法) ===
+# === 📤 4. 战报生成 (含去重 + 独占逻辑) ===
 def get_hot_items(supabase, table_name):
     # 1. 拉取过去 24 小时全量数据
     yesterday = (datetime.now() - timedelta(hours=24)).isoformat()
@@ -81,7 +91,6 @@ def get_hot_items(supabase, table_name):
         res = supabase.table(table_name).select("*").gt("bj_time", yesterday).execute()
         all_tweets = res.data if res.data else []
     except Exception as e:
-        print(f"⚠️ Twitter 数据拉取失败: {e}")
         return {}
 
     if not all_tweets: return {}
@@ -90,34 +99,37 @@ def get_hot_items(supabase, table_name):
     for t in all_tweets:
         t['_score'] = calculate_twitter_score(t)
 
-    # 🔥🔥 3. 核心去重算法 (新增) 🔥🔥
+    # 3. URL 去重 (保留分数最高的版本)
     unique_map = {}
     for t in all_tweets:
-        # 使用 URL 作为唯一身份证
-        # 如果没有 URL，退而求其次用 (用户名+内容) 组合
         key = t.get('url') or (t.get('user_name'), t.get('full_text'))
-        
         if key not in unique_map:
             unique_map[key] = t
         else:
-            # 如果重复，保留“分数更高”的那个（说明互动更多，数据更新）
             if t['_score'] > unique_map[key]['_score']:
                 unique_map[key] = t
     
-    # 替换为去重后的列表
     deduplicated_tweets = list(unique_map.values())
     total_unique_tweets = len(deduplicated_tweets)
 
-    # 4. 计算板块密度
+    # 🔥🔥 4. 独占式分配 (核心修改点) 🔥🔥
     sector_pools = {s: [] for s in SECTORS}
     
     for t in deduplicated_tweets:
         tags = t.get('tags', [])
-        for tag in tags:
-            if tag in sector_pools:
-                sector_pools[tag].append(t)
+        
+        # 按照 SECTORS 列表的顺序进行匹配
+        # 优先级高的板块 (如 Politics) 会先抢走推文
+        matched = False
+        for sector in SECTORS:
+            if sector in tags:
+                sector_pools[sector].append(t)
+                matched = True
+                break # <--- 🛑 关键：找到归宿后立即停止，防止一稿多投！
+        
+        # (可选) 如果没匹配到任何板块，可以放入 Other，这里暂不处理
 
-    # 5. 生成最终矩阵
+    # 5. 生成最终矩阵 (适配 6 列布局)
     intelligence_matrix = {}
     
     for sector, pool in sector_pools.items():
@@ -131,11 +143,20 @@ def get_hot_items(supabase, table_name):
         
         display_items = []
         for t in pool[:quota]:
+            score = fmt_k(t['_score'])
+            views = fmt_k(t.get('views', 0))
+            user = t['user_name']
+            text = t['full_text'].replace('\n', ' ')[:85] + "..." # 稍微加长摘要
+            url = t['url']
+            
+            # 组装适配 Refinery 的数据
             display_items.append({
-                "score": int(t['_score']),
-                "user_name": t['user_name'],
-                "full_text": t['full_text'],
-                "tweet_url": t['url']
+                "display_score": score,
+                "display_heat": f"👁️ {views}", # 对应 资金/热度
+                "display_source": user,        # 对应 状态/源头
+                "display_tags": "",            # Twitter 不需要额外标签列
+                "display_summary": text,       # 对应 摘要
+                "url": url
             })
         
         intelligence_matrix[sector] = display_items
