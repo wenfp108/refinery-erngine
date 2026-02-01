@@ -3,7 +3,19 @@ import math
 from datetime import datetime, timedelta
 
 TABLE_NAME = "twitter_logs"
-SECTORS = ["Politics", "Geopolitics", "Science", "Tech", "Finance", "Crypto", "Economy"]
+
+# 🔥🔥 修改点：调整优先级顺序 🔥🔥
+# Politics 移到最后，防止它吞掉跨板块的推文 (例如 Tech Policy 以前会被 Politics 抢走，现在会留给 Tech)
+SECTORS = [
+    "Geopolitics", 
+    "Science", 
+    "Tech", 
+    "Finance", 
+    "Crypto", 
+    "Economy", 
+    "Politics"  # <--- 压轴登场
+]
+
 TARGET_TOTAL_QUOTA = 30 
 
 def fmt_k(num):
@@ -75,6 +87,7 @@ def get_hot_items(supabase, table_name):
     deduplicated = list(unique_map.values())
     total = len(deduplicated)
 
+    # 独占分配逻辑 (按照 SECTORS 顺序优先匹配)
     sector_pools = {s: [] for s in SECTORS}
     for t in deduplicated:
         tags = t.get('tags', [])
@@ -86,6 +99,7 @@ def get_hot_items(supabase, table_name):
     intelligence_matrix = {}
     for sector, pool in sector_pools.items():
         if not pool: continue
+        
         pool.sort(key=lambda x: x['_score'], reverse=True)
         quota = max(3, math.ceil((len(pool) / total) * TARGET_TOTAL_QUOTA))
         
