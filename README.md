@@ -4,7 +4,7 @@
 
 ## 简介
 
-本项目定期从 GitHub 私有仓库抓取原始数据（Twitter, Polymarket, GitHub），经过清洗和加权处理后，将高价值信息写入 Supabase 数据库并生成 Markdown 报告。
+本项目定期从 GitHub 私有仓库抓取原始数据，经过清洗和加权处理后，将高价值信息写入 Supabase 数据库并生成 Markdown 报告。
 
 ## 权重算法逻辑
 
