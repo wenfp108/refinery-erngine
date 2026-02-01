@@ -1,19 +1,10 @@
-# 📦 Data-Archive 
+# 📦 Data-Archive
 
-> **"Data collection and classification project."**
+> Data collection and classification project.
 
----
+## 🛠️ Environment
 
-
-
-### 🛠️ Environment
-
-* Runner: GitHub Actions (ubuntu-latest)
-* Engine: Node.js / Bun
-* Mode: Automated Backup
-
----
-
-*Last updated: 2026-02-01*
-
----
+- **Runner**: GitHub Actions (`ubuntu-latest`)
+- **Engine**: Python 3.9
+- **Mode**: Automated Schedule (Hourly)
+- **Last Updated**: 2026-02-01
