@@ -32,16 +32,22 @@ class UniversalFactory:
             except: pass
         return masters
 
+    def configure_git(self):
+        """🔥 强行修复 Git 身份报错"""
+        if not self.vault_path: return
+        try:
+            cwd = self.vault_path
+            # 无论之前有没有配，这里强制配一遍
+            subprocess.run(["git", "config", "user.email", "bot@factory.com"], cwd=cwd, check=False)
+            subprocess.run(["git", "config", "user.name", "Cognitive Bot"], cwd=cwd, check=False)
+            print("✅ Git 身份已注入 (Cognitive Bot)")
+        except Exception as e:
+            print(f"⚠️ Git 配置警告: {e}")
+
     def fetch_best_signals(self, limit=300):
-        """尝试从 SQL 获取，如果表名不对会报错，由主函数捕获"""
         print(f"📡 尝试连接 SQL 筛选前 {limit} 条精华...")
         supabase = create_client(self.supabase_url, self.supabase_key)
-        # ⚠️ 注意：这里假设表名叫 raw_signals，如果你的表叫 items 或其他名字，请修改这里
-        response = supabase.table("raw_signals") \
-            .select("*") \
-            .order("created_at", desc=True) \
-            .limit(limit) \
-            .execute()
+        response = supabase.table("raw_signals").select("*").order("created_at", desc=True).limit(limit).execute()
         return response.data
 
     def call_ai(self, model, sys, usr):
@@ -69,9 +75,18 @@ class UniversalFactory:
         except Exception as e: print(f"⚠️ Git同步警告: {e}")
 
     def audit_process(self, row):
-        # 兼容不同数据源的字段名
-        content = str(row.get('full_text') or row.get('eventTitle') or row.get('text') or '')
-        if not content: return []
+        # 🔥 增强读取逻辑：把所有可能的列名都试一遍，防止读不到内容
+        content = (
+            str(row.get('full_text') or '') or 
+            str(row.get('text') or '') or 
+            str(row.get('content') or '') or 
+            str(row.get('eventTitle') or '') or 
+            str(row.get('tweet') or '')
+        )
+        
+        # 如果还没内容，或者内容太短（少于5个字），直接跳过
+        if len(content) < 5: 
+            return []
 
         ref_id = hashlib.sha256(content.encode()).hexdigest()
         
@@ -83,7 +98,7 @@ class UniversalFactory:
         except: score = 50
 
         results = []
-        title = content[:50]
+        title = content[:50].replace('\n', ' ')
         
         # 精华：V3 全量
         if score > 80:
@@ -99,8 +114,8 @@ class UniversalFactory:
                     if t and o: results.append(json.dumps({"ref_id":ref_id, "master":name, "instruction":f"研判: {title}", "thought":t, "output":o}, ensure_ascii=False))
                 except: continue
         
-        # 普通：免费快评
-        elif score > 50:
+        # 普通：免费快评 (放宽到 40 分，保证有产出)
+        elif score > 40:
             st, r = self.call_ai(self.free_model, "请用一句话提取关键价值", content[:500])
             if st == "SUCCESS":
                 results.append(json.dumps({"ref_id":ref_id, "master":"system", "instruction":f"快评: {title}", "thought":"快速扫描", "output":r}, ensure_ascii=False))
@@ -109,23 +124,24 @@ class UniversalFactory:
 
     def process_and_ship(self, input_raw, vault_path):
         self.vault_path = Path(vault_path)
-        signals = []
         
-        # 🛡️【双保险逻辑】先试 SQL，不行就读文件
+        # 🔥 第一件事：配置 Git 身份
+        self.configure_git()
+        
+        signals = []
         try:
             signals = self.fetch_best_signals(limit=300)
             print(f"✅ SQL 连接成功，获取到 {len(signals)} 条数据。")
-        except Exception as e:
-            print(f"⚠️ SQL 表名错误或连接失败: {e}")
-            print(f"🔄 自动切换至本地文件模式 (读取 {input_raw})...")
+        except:
+            print(f"🔄 切换至本地文件模式 (读取 {input_raw})...")
             try:
-                # 降级读取本地 Parquet
                 df = pd.read_parquet(input_raw)
-                # 模拟 limit=300
                 signals = df.head(300).to_dict('records')
-                print(f"✅ 本地文件读取成功，处理前 {len(signals)} 条。")
-            except Exception as file_e:
-                print(f"❌ 严重错误: 本地文件也无法读取: {file_e}")
+                # 打印第一条数据的 Keys，方便调试
+                if len(signals) > 0:
+                    print(f"🔍 [调试] 数据字段名: {list(signals[0].keys())}")
+            except:
+                print("❌ 无法读取数据源")
                 return
 
         day_str = datetime.now().strftime('%Y%m%d')
@@ -133,7 +149,7 @@ class UniversalFactory:
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
         batch_size = 50
-        print(f"🚀 工厂开工！当前模式: {'SQL精选' if 'raw_signals' in str(signals) else '本地文件'}")
+        print(f"🚀 工厂开工！每 {batch_size} 条审计自动保存。")
 
         for i in range(0, len(signals), batch_size):
             batch_rows = signals[i : i + batch_size]
@@ -149,6 +165,9 @@ class UniversalFactory:
                         batch_added += 1
             
             print(f"✨ 进度: {i+len(batch_rows)}/{len(signals)}。本批次产出 {batch_added} 条。")
-            self.git_push_assets()
+            
+            # 只有真的有新数据时才 push，避免空的 commit 报错
+            if batch_added > 0:
+                self.git_push_assets()
 
         print("🏁 任务完成。")
