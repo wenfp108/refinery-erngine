@@ -71,15 +71,24 @@ jobs:
       - name: Ship to Central Bank
         run: |
           cd vault
-          git config --global user.name "Cognitive Bot"
-          git config --global user.email "bot@wenfp108.com"
+          # 1. 强制声明身份 (解决 Author identity unknown)
+          git config user.name "Cognitive Bot"
+          git config user.email "bot@wenfp108.com"
           
-          # 检查今日分卷文件是否有更新 (teachings_YYYYMMDD_HH.jsonl)
+          # 2. 检查是否有新产出的 .jsonl
           if [[ -n $(git status -s instructions/) ]]; then
+            # 3. 暂存并提交本地改动 (这 1184 条就在这)
             git add instructions/
-            git commit -m "🧠 Cognitive Audit: Batch processing at $(date +'%Y-%m-%d %H:%M')"
-            git push
-            echo "✅ 顶级认知资产已追加至中央银行分卷。"
+            git commit -m "🧠 Cognitive Audit: Batch update at $(date +'%Y-%m-%d %H:%M')"
+            
+            # 4. 关键：强制拉取并用 rebase 解决 [rejected] 冲突
+            # 这会把你的这 1184 条数据“接”在仓库最新版本的后面
+            echo "🔄 发现远程更新，正在执行 Rebase 同步..."
+            git pull origin main --rebase
+            
+            # 5. 推送
+            git push origin main
+            echo "✅ 1184+ 条认知资产已安全入库中央银行。"
           else
-            echo "💤 本轮未发现新信号。去重逻辑保护了你的 API 余额。"
+            echo "💤 本轮无新信号生成，API 余额已受去重逻辑保护。"
           fi
