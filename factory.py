@@ -208,15 +208,41 @@ class UniversalFactory:
             return "SUCCESS", res['choices'][0]['message']['content']
         except: return "ERROR", "AI_FAIL"
 
-    def git_push_assets(self):
+   def git_push_assets(self):
+        """防御型推送：解决身份未知、未提交更改以及远程拒绝问题"""
         if not self.vault_path: return
         cwd = self.vault_path
-        subprocess.run(["git", "pull", "origin", "main", "--rebase"], cwd=cwd, check=False)
-        subprocess.run(["git", "add", "."], cwd=cwd, check=False)
-        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=cwd).returncode != 0:
-            msg = f"🧠 Cognitive Audit: {datetime.now().strftime('%H:%M:%S')}"
-            subprocess.run(["git", "commit", "-m", msg], cwd=cwd, check=False)
-            subprocess.run(["git", "push", "origin", "main"], cwd=cwd, check=False)
+        
+        # 1. 【新增】强制注入身份 (解决 Author identity unknown)
+        subprocess.run(["git", "config", "user.email", "bot@factory.com"], cwd=cwd)
+        subprocess.run(["git", "config", "user.name", "Cognitive Bot"], cwd=cwd)
+        # 解决 pull 时的 rebase 策略警告
+        subprocess.run(["git", "config", "pull.rebase", "true"], cwd=cwd)
+
+        # 2. 【顺序调整】先 add 和 commit，把你的 1000 多条数据存进本地仓库
+        subprocess.run(["git", "add", "."], cwd=cwd)
+        
+        # 检查是否有东西可以 commit
+        diff_status = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=cwd)
+        if diff_status.returncode == 0:
+            print("💤 没有发现新资产，跳过同步。")
+            return
+
+        # 3. 执行 Commit
+        commit_msg = f"🧠 Cognitive Audit: {datetime.now().strftime('%H:%M:%S')}"
+        subprocess.run(["git", "commit", "-m", commit_msg], cwd=cwd)
+
+        # 4. 【同步远程】此时再 pull --rebase，Git 就能顺畅地把远程改动接在你的 commit 之后
+        print("🔄 正在通过 rebase 同步远程仓库...")
+        subprocess.run(["git", "pull", "origin", "main", "--rebase"], cwd=cwd)
+
+        # 5. 最终推送
+        push_res = subprocess.run(["git", "push", "origin", "main"], cwd=cwd, capture_output=True, text=True)
+        
+        if push_res.returncode == 0:
+            print("🚀 认知资产已成功同步至中央银行。")
+        else:
+            print(f"❌ 最终推送失败: {push_res.stderr}")
 
 if __name__ == "__main__":
     factory = UniversalFactory()
