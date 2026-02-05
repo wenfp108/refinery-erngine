@@ -19,7 +19,7 @@ auth = Auth.Token(GITHUB_TOKEN)
 gh_client = Github(auth=auth)
 private_repo = gh_client.get_repo(PRIVATE_BANK_ID)
 
-# === 🧩 2. 插件发现系统 (已修改：强制指向 raw_signals) ===
+# === 🧩 2. 插件发现系统 (强制指向 raw_signals) ===
 def get_all_processors():
     procs = {}
     proc_dir = "./processors"
@@ -42,17 +42,17 @@ def get_all_processors():
 # === ⏱️ 辅助：检查数据新鲜度 ===
 def get_data_freshness(table_name, source_name=None):
     try:
-        query = supabase.table(table_name).select("bj_time").neq("bj_time", "null")
+        query = supabase.table(table_name).select("created_at").neq("created_at", "null")
         
         # 如果是 raw_signals，需要按 signal_type 过滤
         if table_name == "raw_signals" and source_name:
             query = query.eq("signal_type", source_name)
             
-        res = query.order("bj_time", desc=True).limit(1).execute()
+        res = query.order("created_at", desc=True).limit(1).execute()
         
         if not res.data: return (False, 9999, "无数据")
         
-        last_time_str = res.data[0]['bj_time']
+        last_time_str = res.data[0]['created_at']
         if not last_time_str: return (False, 9999, "无时间戳")
 
         try:
@@ -63,7 +63,7 @@ def get_data_freshness(table_name, source_name=None):
         
         now = datetime.now(timezone(timedelta(hours=8)))
         if last_time.tzinfo is None:
-            last_time = last_time.replace(tzinfo=timezone(timedelta(hours=8)))
+            last_time = last_time.replace(tzinfo=timezone.utc)
         
         diff = now - last_time
         minutes_ago = int(diff.total_seconds() / 60)
@@ -72,8 +72,9 @@ def get_data_freshness(table_name, source_name=None):
     except Exception as e:
         return (True, 0, "CheckError")
 
-# === 🔥 3. 战报工厂 ===
+# === 🔥 3. 战报工厂 (辅助生成) ===
 def generate_hot_reports(processors_config):
+    # 注意：Factory.py 是主战场，Refinery 里的这个函数主要用于简单的 Markdown 归档
     bj_now = datetime.now(timezone(timedelta(hours=8)))
     year = bj_now.strftime('%Y')
     month = bj_now.strftime('%m')
@@ -88,25 +89,21 @@ def generate_hot_reports(processors_config):
     md_report += "> **机制说明**：全源智能去重 | 资金流向优先 | 自动归档\n\n"
 
     has_content = False
-    active_sources_count = 0
 
     for source_name, config in processors_config.items():
         if hasattr(config["module"], "get_hot_items"):
             try:
                 table = config["table_name"]
-                # 传入 source_name 进行过滤
-                is_fresh, mins_ago, last_update_time = get_data_freshness(table, source_name)
+                is_fresh, mins_ago, _ = get_data_freshness(table, source_name)
                 
+                # 如果数据太老 (超过12小时) 就不写进简报了
                 if not is_fresh and mins_ago > 720: 
                     continue 
 
-                # 注意：get_hot_items 里面的逻辑可能还没适配 raw_signals，
-                # 但 Factory.py 是主战场，这个战报功能可以暂时作为辅助。
                 sector_data = config["module"].get_hot_items(supabase, table)
                 if not sector_data: continue
 
                 has_content = True
-                active_sources_count += 1
                 
                 freshness_tag = "" if is_fresh else f" (⚠️ 数据滞后 {int(mins_ago/60)}h)"
                 md_report += f"## 📡 来源：{source_name.upper()}{freshness_tag}\n"
@@ -139,46 +136,63 @@ def generate_hot_reports(processors_config):
     except Exception as e: 
         print(f"❌ 写入失败: {e}")
 
-# === 🚜 4. 滚动收割 (适配 raw_signals) ===
+# === 🚜 4. 滚动收割 (✅ 修正版：只清理 raw_signals) ===
 def perform_grand_harvest(processors_config):
     print("⏰ 触发每日滚动收割 (Archive & Purge)...")
     cutoff_date = (datetime.now() - timedelta(days=7))
     cutoff_str = cutoff_date.isoformat()
     date_tag = cutoff_date.strftime('%Y%m%d')
 
-    # 只需要对 raw_signals 做一次清理即可
-    table = "raw_signals"
-    try:
-        res = supabase.table(table).select("*").lt("created_at", cutoff_str).execute()
-        data = res.data
-        
-        if data:
-            df = pd.DataFrame(data)
-            buffer = io.BytesIO()
-            df.to_parquet(buffer, index=False, engine='pyarrow', compression='snappy')
-            
-            year_month = cutoff_date.strftime('%Y/%m')
-            archive_path = f"archive/{year_month}/{table}_{date_tag}.parquet"
-            
-            private_repo.create_file(
-                path=archive_path,
-                message=f"🏛️ Archive: {table} batch",
-                content=buffer.getvalue(),
-                branch="main" 
-            )
-            
-            ids = [item['id'] for item in data if 'id' in item]
-            if ids:
-                for i in range(0, len(ids), 500):
-                    supabase.table(table).delete().in_("id", ids[i:i+500]).execute()
-                print(f"   🗑️ {table}: 已清理 {len(ids)} 条过期数据")
-    except Exception as e:
-        pass
+    # ✅ 修正：列表里只有 raw_signals，彻底删除旧表引用
+    target_tables = ["raw_signals"] 
 
-# === 🏦 5. 搬运逻辑 (核心修改：注入 signal_type) ===
+    for table in target_tables:
+        try:
+            # 1. 归档逻辑 (将7天前的数据打包上传 GitHub)
+            res = supabase.table(table).select("*").lt("created_at", cutoff_str).execute()
+            data = res.data
+            
+            if data:
+                # 转换为 Parquet 上传 GitHub
+                df = pd.DataFrame(data)
+                buffer = io.BytesIO()
+                df.to_parquet(buffer, index=False, engine='pyarrow', compression='snappy')
+                
+                year_month = cutoff_date.strftime('%Y/%m')
+                archive_path = f"archive/{year_month}/{table}_{date_tag}.parquet"
+                
+                try:
+                    private_repo.create_file(
+                        path=archive_path,
+                        message=f"🏛️ Archive: {table} batch",
+                        content=buffer.getvalue(),
+                        branch="main" 
+                    )
+                except Exception as upload_e:
+                    print(f"   ⚠️ 归档文件上传失败 (可能已存在): {upload_e}")
+                
+                # 2. 清理逻辑 (删除已归档的数据)
+                # 使用循环分批删除，防止超时
+                ids = [item['id'] for item in data if 'id' in item]
+                if ids:
+                    batch_size = 500
+                    for i in range(0, len(ids), batch_size):
+                        batch = ids[i : i + batch_size]
+                        supabase.table(table).delete().in_("id", batch).execute()
+                    print(f"   🗑️ {table}: 已清理 {len(ids)} 条过期数据")
+            else:
+                pass # 没有过期数据
+                
+        except Exception as e:
+            # 只有 raw_signals 会走到这里，旧表根本不会报错
+            print(f"   ⚠️ [{table}] 收割任务跳过: {e}")
+
+# === 🏦 5. 搬运逻辑 (核心：JSON -> Supabase) ===
 def process_and_upload(path, sha, config):
+    # 检查哨兵：文件是否处理过
     check = supabase.table("processed_files").select("file_sha").eq("file_sha", sha).execute()
     if check.data: return 0
+    
     try:
         content_file = private_repo.get_contents(path)
         raw_data = json.loads(base64.b64decode(content_file.content).decode('utf-8'))
@@ -192,15 +206,15 @@ def process_and_upload(path, sha, config):
             for item in items:
                 item['signal_type'] = config["source_name"]
                 
-                # 兼容性处理：确保 raw_json 存在 (如果 processor 没生成)
+                # 兼容性处理：确保 raw_json 存在
                 if 'raw_json' not in item:
-                    item['raw_json'] = item.copy() # 简单备份
+                    item['raw_json'] = item.copy()
 
             # 分批写入 raw_signals
             for i in range(0, len(items), 500):
                 supabase.table("raw_signals").insert(items[i : i+500]).execute()
             
-            # 记录文件已处理
+            # 登记哨兵
             supabase.table("processed_files").upsert({
                 "file_sha": sha, 
                 "file_path": path,
@@ -232,7 +246,8 @@ def sync_bank_to_sql(processors_config, full_scan=False):
                         stats[source_key] += added
         except Exception as e: print(f"❌ Scan Error: {e}")
     else:
-        since = datetime.now(timezone.utc) - timedelta(hours=24) # 稍微多看一点时间，防止漏
+        # 增量模式：只检查最近 24 小时以内的 Commit
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
         commits = private_repo.get_commits(since=since)
         for commit in commits:
             for f in commit.files:
