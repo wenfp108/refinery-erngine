@@ -245,9 +245,14 @@ def sync_bank_to_sql(processors_config, full_scan=False):
 if __name__ == "__main__":
     all_procs = get_all_processors()
     is_full_scan = (os.environ.get("FORCE_FULL_SCAN") == "true")
+    
+    # 1. 搬运数据
     sync_bank_to_sql(all_procs, full_scan=is_full_scan)
+    
+    # 2. 生成战报 (这一行必须保留！)
     generate_hot_reports(all_procs)
-    current_hour_utc = datetime.now(timezone.utc).hour
-    if (20 <= current_hour_utc <= 22) or (os.environ.get("FORCE_HARVEST")=="true"):
-        perform_grand_harvest(all_procs)
+    
+    # 3. 滚动收割 (直接运行，不看时间，不看脸色)
+    perform_grand_harvest(all_procs)
+    
     print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ 审计任务圆满完成。")
