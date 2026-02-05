@@ -1,256 +1,311 @@
-import os, json, base64, requests, importlib.util, sys
 import pandas as pd
-import io
-from datetime import datetime, timedelta, timezone
+import hashlib, json, os, requests, subprocess, time
+from pathlib import Path
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from supabase import create_client
-from github import Github, Auth
 
-# === 🛡️ 1. 核心配置 ===
-PRIVATE_BANK_ID = "wenfp108/Central-Bank" 
-GITHUB_TOKEN = os.environ.get("GH_PAT") 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+class UniversalFactory:
+    def __init__(self, masters_path="masters"):
+        self.masters_path = Path(masters_path)
+        self.masters = self._load_masters()
+        # API 与 数据库配置
+        self.api_key = os.environ.get("SILICON_FLOW_KEY")
+        self.api_url = "https://api.siliconflow.cn/v1/chat/completions"
+        self.supabase_url = os.environ.get("SUPABASE_URL")
+        self.supabase_key = os.environ.get("SUPABASE_KEY")
+        self.vault_path = None
+        
+        # 🤖 模型设定：全员 V3，废弃 Scout
+        self.v3_model = "deepseek-ai/DeepSeek-V3"
 
-if not all([GITHUB_TOKEN, SUPABASE_URL, SUPABASE_KEY]):
-    sys.exit("❌ [审计异常] 环境变量缺失。")
-
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-auth = Auth.Token(GITHUB_TOKEN)
-gh_client = Github(auth=auth)
-private_repo = gh_client.get_repo(PRIVATE_BANK_ID)
-
-# === 🧩 2. 插件发现系统 (已修改：强制指向 raw_signals) ===
-def get_all_processors():
-    procs = {}
-    proc_dir = "./processors"
-    if not os.path.exists(proc_dir): return procs
-    for filename in os.listdir(proc_dir):
-        if filename.endswith(".py") and not filename.startswith("__"):
-            name = filename[:-3]
+    def _load_masters(self):
+        import importlib.util
+        masters = {}
+        if not self.masters_path.exists(): return masters
+        for file_path in self.masters_path.glob("*.py"):
+            if file_path.name.startswith("__"): continue
             try:
-                spec = importlib.util.spec_from_file_location(f"mod_{name}", os.path.join(proc_dir, filename))
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                procs[name] = {
-                    "module": mod,
-                    "source_name": name,  # 记录来源名 (twitter, github...)
-                    "table_name": "raw_signals",  # 🔥 强制统一表名
-                }
-            except Exception as e: print(f"⚠️ 插件 {name} 加载失败: {e}")
-    return procs
+                name = file_path.stem
+                spec = importlib.util.spec_from_file_location(name, file_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if hasattr(module, 'audit'): masters[name] = module
+            except: pass
+        return masters
 
-# === ⏱️ 辅助：检查数据新鲜度 ===
-def get_data_freshness(table_name, source_name=None):
-    try:
-        query = supabase.table(table_name).select("bj_time").neq("bj_time", "null")
-        
-        # 如果是 raw_signals，需要按 signal_type 过滤
-        if table_name == "raw_signals" and source_name:
-            query = query.eq("signal_type", source_name)
-            
-        res = query.order("bj_time", desc=True).limit(1).execute()
-        
-        if not res.data: return (False, 9999, "无数据")
-        
-        last_time_str = res.data[0]['bj_time']
-        if not last_time_str: return (False, 9999, "无时间戳")
+    def configure_git(self):
+        if not self.vault_path: return
+        subprocess.run(["git", "config", "--global", "user.email", "bot@factory.com"], check=False)
+        subprocess.run(["git", "config", "--global", "user.name", "Cognitive Bot"], check=False)
 
+    def fetch_elite_signals(self):
+        """
+        🌟 核心逻辑：180 精锐席位 (Elite Squad 180)
+        特性：
+        1. 去重盾 (Dedup Shield): Polymarket 按 Slug 去重
+        2. 狙击手保护 (Sniper Protection): Sniper 信号独立加权
+        3. 标签雷达 (Smart Radar): 强制插队经济/科学/科技
+        4. 板块熔断 (Subreddit Cap): Reddit 每个板块限 3 条
+        """
         try:
-            last_time_str = last_time_str.replace('Z', '+00:00')
-            last_time = datetime.fromisoformat(last_time_str)
-        except:
-            return (False, 9999, last_time_str)
-        
-        now = datetime.now(timezone(timedelta(hours=8)))
-        if last_time.tzinfo is None:
-            last_time = last_time.replace(tzinfo=timezone(timedelta(hours=8)))
-        
-        diff = now - last_time
-        minutes_ago = int(diff.total_seconds() / 60)
-        
-        return (minutes_ago <= 65, minutes_ago, last_time.strftime('%H:%M'))
-    except Exception as e:
-        return (True, 0, "CheckError")
+            supabase = create_client(self.supabase_url, self.supabase_key)
+            print("💎 启动精锐筛选 (目标: ~180 条 | 启用严格去重)...")
 
-# === 🔥 3. 战报工厂 ===
-def generate_hot_reports(processors_config):
-    bj_now = datetime.now(timezone(timedelta(hours=8)))
-    year = bj_now.strftime('%Y')
-    month = bj_now.strftime('%m')
-    day = bj_now.strftime('%d')
-    hour = bj_now.strftime('%H')
-    
-    file_name = f"{hour}点战报.md"
-    report_path = f"reports/{year}/{month}/{day}/{file_name}"
-    
-    date_display = bj_now.strftime('%Y-%m-%d %H:%M')
-    md_report = f"# 🚀 Architect's Alpha 情报审计 ({date_display})\n\n"
-    md_report += "> **机制说明**：全源智能去重 | 资金流向优先 | 自动归档\n\n"
+            # ==========================================
+            # 1. GitHub & Paper: 全量 (上限 50)
+            # ==========================================
+            rare_raw = supabase.table("raw_signals") \
+                .select("*") \
+                .or_("signal_type.eq.github,signal_type.eq.paper") \
+                .order("created_at", desc=True) \
+                .limit(50).execute().data or []
+            
+            # 简单去重 (保留最新)
+            unique_rare = {}
+            for r in rare_raw:
+                k = r.get('repo_name') or r.get('title')
+                if k and k not in unique_rare: unique_rare[k] = r
+            rare_picks = list(unique_rare.values())
+            print(f"🔹 稀缺源: {len(rare_picks)} 条")
 
-    has_content = False
-    active_sources_count = 0
+            # ==========================================
+            # 2. Twitter: Top 60 (VIP + Viral)
+            # ==========================================
+            tw_raw = supabase.table("raw_signals").select("*").eq("signal_type", "twitter").order("created_at", desc=True).limit(500).execute().data or []
+            vip_list = ['Karpathy', 'Musk', 'Vitalik', 'LeCun', 'Dalio', 'Naval', 'Sama', 'PaulG']
+            
+            def score_twitter(row):
+                rt = row.get('retweets') or 0
+                bm = row.get('bookmarks') or 0
+                like = row.get('likes') or 0
+                user = str(row.get('user_name', '')).lower()
+                
+                # 基础分：(RT x 5) + (BM x 10) + Like
+                # 🔧 修正：应对数据中 Bookmark 为 0 的情况，如果 RT 极高，给予额外补偿
+                score = (rt * 5) + (bm * 10) + like
+                if rt > 10000: score += 5000  # 病毒式传播补偿
+                
+                # VIP 加权
+                is_vip = any(v.lower() in user for v in vip_list)
+                if is_vip:
+                    # 只有当 VIP 的推文稍微有点热度时才加分，防止垃圾刷屏
+                    if rt > 10 or like > 50: score += 10000
+                    else: score += 500 # 纯水贴只加一点点
+                
+                return score
 
-    for source_name, config in processors_config.items():
-        if hasattr(config["module"], "get_hot_items"):
+            for r in tw_raw: r['_rank'] = score_twitter(r)
+            tw_picks = sorted(tw_raw, key=lambda x:x['_rank'], reverse=True)[:60]
+            print(f"🔹 Twitter: {len(tw_picks)} 条")
+
+            # ==========================================
+            # 3. Reddit: Top 30 (去重 + 板块熔断)
+            # ==========================================
+            rd_raw = supabase.table("raw_signals").select("*").eq("signal_type", "reddit").order("created_at", desc=True).limit(500).execute().data or []
+
+            # A. URL 去重
+            unique_rd_map = {}
+            for r in rd_raw:
+                url = r.get('url')
+                if not url: continue
+                curr_score = r.get('score') or 0
+                if url not in unique_rd_map or curr_score > (unique_rd_map[url].get('score') or 0):
+                    unique_rd_map[url] = r
+            deduplicated_rd = list(unique_rd_map.values())
+
+            # B. 打分
+            def score_reddit(row):
+                s = row.get('score') or 0
+                v = abs(float(row.get('vibe') or 0))
+                return s * (1 + v)
+
+            sorted_rd = sorted(deduplicated_rd, key=score_reddit, reverse=True)
+            
+            # C. 板块熔断 (每个 Subreddit 限 3 条)
+            rd_picks = []
+            sub_counts = {}
+            for r in sorted_rd:
+                if len(rd_picks) >= 30: break
+                sub = str(r.get('subreddit', 'unknown')).lower()
+                if sub_counts.get(sub, 0) >= 3: continue
+                rd_picks.append(r)
+                sub_counts[sub] = sub_counts.get(sub, 0) + 1
+            
+            print(f"🔹 Reddit: {len(rd_picks)} 条 (Top 30 | 已熔断)")
+
+            # ==========================================
+            # 4. Polymarket: Top 60 (去重 + 智能分层)
+            # ==========================================
+            poly_raw = supabase.table("raw_signals").select("*").eq("signal_type", "polymarket").order("created_at", desc=True).limit(800).execute().data or []
+
+            # A. Slug 去重
+            unique_poly_map = {}
+            for p in poly_raw:
+                raw = p.get('raw_json')
+                if isinstance(raw, str): 
+                    try: raw = json.loads(raw)
+                    except: raw = {}
+                p['_parsed'] = raw
+                
+                slug = p.get('slug') or raw.get('slug')
+                if not slug: continue
+                
+                curr_liq = float(p.get('liquidity') or raw.get('liquidity') or 0)
+                
+                if slug not in unique_poly_map:
+                    unique_poly_map[slug] = p
+                else:
+                    prev_liq = float(unique_poly_map[slug].get('liquidity') or unique_poly_map[slug]['_parsed'].get('liquidity') or 0)
+                    if curr_liq > prev_liq: unique_poly_map[slug] = p
+            
+            deduplicated_poly = list(unique_poly_map.values())
+
+            # B. 智能打分 (四级准入)
+            def score_poly(row):
+                raw = row['_parsed']
+                tags = raw.get('strategy_tags', [])
+                cat = str(row.get('category', '') or raw.get('category', '')).upper()
+                engine = str(row.get('engine', '') or raw.get('engine', '')).lower()
+                liq = float(row.get('liquidity') or raw.get('liquidity') or 0)
+
+                base = 0
+                # 👑 Tier 1: 黑天鹅
+                if 'TAIL_RISK' in tags: base = 10_000_000
+                # 🚀 Tier 2: 核心叙事 (ECONOMY/SCIENCE/TECH)
+                elif any(x in cat for x in ['ECONOMY', 'SCIENCE', 'CLIMATE', 'TECH', 'FINANCE']): base = 5_000_000
+                # 🔫 Tier 3: Sniper 保护
+                elif 'sniper' in engine and liq > 10000: base = 2_000_000
+                # 💰 Tier 4: 大资金
+                elif liq > 500_000: base = 1_000_000
+                
+                return base + liq
+
+            for r in deduplicated_poly: r['_rank'] = score_poly(r)
+            poly_picks = sorted(deduplicated_poly, key=lambda x:x['_rank'], reverse=True)[:60]
+            print(f"🔹 Polymarket: {len(poly_picks)} 条 (Top 60)")
+
+            # ==========================================
+            # 5. 最终集结 (宁缺毋滥，不补位)
+            # ==========================================
+            final_batch = rare_picks + tw_picks + rd_picks + poly_picks
+            print(f"🚀 全域精锐: {len(final_batch)} 条 (去重完毕)")
+            return final_batch
+
+        except Exception as e:
+            print(f"⚠️ 筛选异常: {e} (启动安全模式)")
+            return []
+
+    def call_ai(self, model, sys, usr):
+        if not self.api_key: return "ERROR", "No Key"
+        # 🧠 注入‘逻辑接骨’指令
+        enhanced_sys = sys + "\n[重要]：你现在是首席审计官。不要像机器人一样总结，要像索罗斯/芒格一样思考。若信号断档，请基于你的知识库推演背景。"
+        payload = {
+            "model": model, "messages": [{"role": "system", "content": enhanced_sys}, {"role": "user", "content": usr}],
+            "temperature": 0.7, "max_tokens": 1500
+        }
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        try:
+            res = requests.post(self.api_url, json=payload, headers=headers, timeout=60).json()
+            return "SUCCESS", res['choices'][0]['message']['content']
+        except: return "ERROR", "Timeout"
+
+    def git_push_assets(self):
+        if not self.vault_path: return
+        cwd = self.vault_path
+        subprocess.run(["git", "add", "."], cwd=cwd)
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=cwd).returncode != 0:
+            subprocess.run(["git", "commit", "-m", f"🧠 Cognitive Audit: {datetime.now().strftime('%H:%M:%S')}"], cwd=cwd)
+            subprocess.run(["git", "push"], cwd=cwd)
+
+    def audit_process(self, row, processed_ids):
+        # === 1. 构建上下文 ===
+        source = row.get('signal_type', 'unknown').lower()
+        parts = [f"【Source: {source.upper()}】"]
+        
+        # 增强上下文构建
+        if source == 'github':
+            parts.append(f"项目: {row.get('repo_name')} | Stars: {row.get('stars')} | Topics: {row.get('topics')}")
+            parts.append(f"描述: {row.get('full_text') or '新项目发布'}")
+            parts.append(f"Link: {row.get('url')}")
+        elif source == 'paper':
+            parts.append(f"论文: {row.get('title')} | 期刊: {row.get('journal')}")
+            parts.append(f"引用: {row.get('citations')}")
+            parts.append(f"摘要: {row.get('full_text')}")
+        elif source in ['twitter', 'reddit']:
+            parts.append(f"用户: {row.get('user_name') or row.get('subreddit')} | Score: {row.get('_rank',0)}")
+            parts.append(f"内容: {row.get('full_text') or row.get('title')}")
+        else: # Polymarket
+            raw = row.get('raw_json')
+            if isinstance(raw, str): 
+                try: raw = json.loads(raw)
+                except: raw = {}
+            parts.append(f"预测: {row.get('title')} | 问题: {row.get('question')}")
+            parts.append(f"价格: {row.get('prices')} | 流动性: ${raw.get('liquidity')}")
+            parts.append(f"标签: {raw.get('strategy_tags')} | 分类: {row.get('category')}")
+
+        content = "\n".join(parts)
+        ref_id = hashlib.sha256(content.encode()).hexdigest()
+        
+        if ref_id in processed_ids: return []
+
+        results = []
+        # === 2. 强制 V3 审计 (No Scout) ===
+        def ask_v3(s, u):
+            st, r = self.call_ai(self.v3_model, s, u)
+            if st == "SUCCESS" and "### Output" in r:
+                return r.split("### Output")[0].replace("### Thought","").strip(), r.split("### Output")[1].strip()
+            if st == "SUCCESS": return "Deep Dive", r
+            return None, None
+        
+        for name, mod in self.masters.items():
             try:
-                table = config["table_name"]
-                # 传入 source_name 进行过滤
-                is_fresh, mins_ago, last_update_time = get_data_freshness(table, source_name)
-                
-                if not is_fresh and mins_ago > 720: 
-                    continue 
+                if hasattr(mod, 'audit'):
+                    t, o = mod.audit(row, ask_v3)
+                    if t and o:
+                        results.append(json.dumps({
+                            "ref_id": ref_id, "type": "V3_MASTER", "source": source,
+                            "master": name, "input": content[:300].replace('\n',' '), "thought": t, "output": o
+                        }, ensure_ascii=False))
+            except: continue
+        return results
 
-                # 注意：get_hot_items 里面的逻辑可能还没适配 raw_signals，
-                # 但 Factory.py 是主战场，这个战报功能可以暂时作为辅助。
-                sector_data = config["module"].get_hot_items(supabase, table)
-                if not sector_data: continue
-
-                has_content = True
-                active_sources_count += 1
-                
-                freshness_tag = "" if is_fresh else f" (⚠️ 数据滞后 {int(mins_ago/60)}h)"
-                md_report += f"## 📡 来源：{source_name.upper()}{freshness_tag}\n"
-                
-                for sector, data in sector_data.items():
-                    md_report += f"### 🏷️ 板块：{sector}\n"
-                    if isinstance(data, dict):
-                        if "header" in data: md_report += data["header"] + "\n"
-                        if "rows" in data and isinstance(data["rows"], list):
-                            for row in data["rows"]: md_report += row + "\n"
-                    elif isinstance(data, list):
-                        md_report += "| 信号 | 内容 | 🔗 |\n| :--- | :--- | :--- |\n"
-                        for item in data:
-                            md_report += f"| {item.get('score','-')} | {item.get('full_text','-')} | [🔗]({item.get('url','#')}) |\n"
-                    md_report += "\n"
-            except Exception as e:
-                pass 
-
-    if not has_content:
-        md_report += "\n\n**🛑 本轮扫描全域静默，请查阅历史归档。**"
-
-    try:
-        try:
-            old = private_repo.get_contents(report_path)
-            private_repo.update_file(old.path, f"📊 Update: {file_name}", md_report, old.sha)
-            print(f"📝 战报更新：{report_path}")
-        except:
-            private_repo.create_file(report_path, f"🚀 New: {file_name}", md_report)
-            print(f"📝 战报创建：{report_path}")
-    except Exception as e: 
-        print(f"❌ 写入失败: {e}")
-
-# === 🚜 4. 滚动收割 (适配 raw_signals) ===
-def perform_grand_harvest(processors_config):
-    print("⏰ 触发每日滚动收割 (Archive & Purge)...")
-    cutoff_date = (datetime.now() - timedelta(days=7))
-    cutoff_str = cutoff_date.isoformat()
-    date_tag = cutoff_date.strftime('%Y%m%d')
-
-    # 只需要对 raw_signals 做一次清理即可
-    table = "raw_signals"
-    try:
-        res = supabase.table(table).select("*").lt("created_at", cutoff_str).execute()
-        data = res.data
+    def process_and_ship(self, input_raw, vault_path):
+        self.vault_path = Path(vault_path)
+        self.configure_git()
         
-        if data:
-            df = pd.DataFrame(data)
-            buffer = io.BytesIO()
-            df.to_parquet(buffer, index=False, engine='pyarrow', compression='snappy')
+        # 加载去重 ID
+        day_str = datetime.now().strftime('%Y%m%d')
+        output_file = self.vault_path / "instructions" / f"teachings_{day_str}.jsonl"
+        processed_ids = set()
+        if output_file.exists():
+            with open(output_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try: processed_ids.add(json.loads(line).get('ref_id'))
+                    except: pass
+
+        # 🌟 获取 180 精锐信号
+        signals = self.fetch_elite_signals()
+        if not signals:
+            print("💤 本轮无新信号入库。")
+            return
+
+        print(f"🚀 工厂全速运转: {len(signals)} 条 V3 级审计正在进行...")
+
+        batch_size = 50
+        for i in range(0, len(signals), batch_size):
+            chunk = signals[i : i + batch_size]
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                res = list(executor.map(lambda r: self.audit_process(r, processed_ids), chunk))
             
-            year_month = cutoff_date.strftime('%Y/%m')
-            archive_path = f"archive/{year_month}/{table}_{date_tag}.parquet"
+            added = []
+            for r_list in res:
+                if r_list: added.extend(r_list)
             
-            private_repo.create_file(
-                path=archive_path,
-                message=f"🏛️ Archive: {table} batch",
-                content=buffer.getvalue(),
-                branch="main" 
-            )
-            
-            ids = [item['id'] for item in data if 'id' in item]
-            if ids:
-                for i in range(0, len(ids), 500):
-                    supabase.table(table).delete().in_("id", ids[i:i+500]).execute()
-                print(f"   🗑️ {table}: 已清理 {len(ids)} 条过期数据")
-    except Exception as e:
-        pass
+            if added:
+                with open(output_file, 'a', encoding='utf-8') as f:
+                    f.write('\n'.join(added) + '\n')
+                print(f"✨ 批次 {i//50 + 1} 完成 | 产出 {len(added)} 条认知资产")
+                self.git_push_assets() # 50条一存
 
-# === 🏦 5. 搬运逻辑 (核心修改：注入 signal_type) ===
-def process_and_upload(path, sha, config):
-    check = supabase.table("processed_files").select("file_sha").eq("file_sha", sha).execute()
-    if check.data: return 0
-    try:
-        content_file = private_repo.get_contents(path)
-        raw_data = json.loads(base64.b64decode(content_file.content).decode('utf-8'))
-        
-        # 调用 Processor 清洗数据
-        items = config["module"].process(raw_data, path)
-        count = len(items) if items else 0
-        
-        if items:
-            # 🔥 注入核心字段 signal_type
-            for item in items:
-                item['signal_type'] = config["source_name"]
-                
-                # 兼容性处理：确保 raw_json 存在 (如果 processor 没生成)
-                if 'raw_json' not in item:
-                    item['raw_json'] = item.copy() # 简单备份
-
-            # 分批写入 raw_signals
-            for i in range(0, len(items), 500):
-                supabase.table("raw_signals").insert(items[i : i+500]).execute()
-            
-            # 记录文件已处理
-            supabase.table("processed_files").upsert({
-                "file_sha": sha, 
-                "file_path": path,
-                "engine": config["source_name"],
-                "item_count": count
-            }).execute()
-            return count
-    except Exception as e: 
-        print(f"❌ 处理文件 {path} 失败: {e}")
-    return 0
-
-def sync_bank_to_sql(processors_config, full_scan=False):
-    current_time = datetime.now().strftime('%H:%M:%S')
-    mode_str = "全量补录" if full_scan else "1小时增量"
-    print(f"[{current_time}] 🏦 巡检开始: {mode_str}提取")
-    stats = {name: 0 for name in processors_config.keys()}
-    
-    if full_scan:
-        try:
-            contents = private_repo.get_contents("")
-            while contents:
-                file_content = contents.pop(0)
-                if file_content.type == "dir":
-                    contents.extend(private_repo.get_contents(file_content.path))
-                elif file_content.name.endswith(".json"):
-                    source_key = file_content.path.split('/')[0]
-                    if source_key in processors_config:
-                        added = process_and_upload(file_content.path, file_content.sha, processors_config[source_key])
-                        stats[source_key] += added
-        except Exception as e: print(f"❌ Scan Error: {e}")
-    else:
-        since = datetime.now(timezone.utc) - timedelta(hours=24) # 稍微多看一点时间，防止漏
-        commits = private_repo.get_commits(since=since)
-        for commit in commits:
-            for f in commit.files:
-                if f.filename.endswith('.json'):
-                    source_key = f.filename.split('/')[0]
-                    if source_key in processors_config:
-                        added = process_and_upload(f.filename, f.sha, processors_config[source_key])
-                        stats[source_key] += added
-
-    for source, count in stats.items():
-        if count > 0: print(f"✅ {source} (+{count}) -> raw_signals")
-
-if __name__ == "__main__":
-    all_procs = get_all_processors()
-    is_full_scan = (os.environ.get("FORCE_FULL_SCAN") == "true")
-    
-    sync_bank_to_sql(all_procs, full_scan=is_full_scan)
-    generate_hot_reports(all_procs)
-    perform_grand_harvest(all_procs)
-    
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ 审计任务圆满完成。")
+        print("🏁 任务完成。")
