@@ -16,7 +16,7 @@ class UniversalFactory:
         self.supabase_key = os.environ.get("SUPABASE_KEY")
         self.v3_model = "deepseek-ai/DeepSeek-V3"
         self.vault_path = None
-        self.memory = {} # 🧠 跨时区认知记忆库
+        self.memory = {} 
 
     def _load_masters(self):
         masters = {}
@@ -34,13 +34,13 @@ class UniversalFactory:
         return masters
 
     def build_day_memory(self, vault_path):
-        """🧠 跨时区记忆同步：扫描今日全时段文件，确保不重复、能改口"""
+        """🧠 跨时区记忆同步：锁定今日已审计的哈希，省钱核心"""
         day_str = datetime.now().strftime('%Y%m%d')
         instructions_dir = vault_path / "instructions"
         if not instructions_dir.exists(): return set()
         
         day_processed_ids = set()
-        print(f"🧐 正在加载今日全天记忆...")
+        print(f"🧐 正在加载今日全天（2小时步进）记忆...")
         for f in instructions_dir.glob(f"teachings_{day_str}_*.jsonl"):
             try:
                 with open(f, 'r', encoding='utf-8') as f_in:
@@ -58,12 +58,12 @@ class UniversalFactory:
         return day_processed_ids
 
     def fetch_elite_signals(self):
-        """🌟 核心逻辑：精锐席位筛选 (严格保留 50/60/30/80 原始配额)"""
+        """🌟 严格保留你的原装权重 50/60/30/80"""
         try:
             supabase = create_client(self.supabase_url, self.supabase_key)
-            print("💎 启动精锐筛选 (目标: ~220 条)...")
+            print("💎 启动 2 小时一度精锐筛选...")
 
-            # 1. GitHub & Paper (Limit 50)
+            # 1. GitHub & Paper
             rare_raw = supabase.table("raw_signals").select("*").or_("signal_type.eq.github,signal_type.eq.paper").order("created_at", desc=True).limit(50).execute().data or []
             unique_rare = {}
             for r in rare_raw:
@@ -71,7 +71,7 @@ class UniversalFactory:
                 if k and k not in unique_rare: unique_rare[k] = r
             rare_picks = list(unique_rare.values())
 
-            # 2. Twitter (Limit 60 | VIP 权重)
+            # 2. Twitter (VIP 权重)
             tw_raw = supabase.table("raw_signals").select("*").eq("signal_type", "twitter").order("created_at", desc=True).limit(500).execute().data or []
             vip_list = ['Karpathy', 'Musk', 'Vitalik', 'LeCun', 'Dalio', 'Naval', 'Sama', 'PaulG']
             def score_twitter(row):
@@ -84,13 +84,13 @@ class UniversalFactory:
             for r in tw_raw: r['_rank'] = score_twitter(r)
             tw_picks = sorted(tw_raw, key=lambda x:x['_rank'], reverse=True)[:60]
 
-            # 3. Reddit (Limit 30 | Vibe 权重)
+            # 3. Reddit (Vibe 权重)
             rd_raw = supabase.table("raw_signals").select("*").eq("signal_type", "reddit").order("created_at", desc=True).limit(500).execute().data or []
             unique_rd = {r.get('url'): r for r in rd_raw if r.get('url')}
             def score_reddit(row): return (row.get('score') or 0) * (1 + abs(float(row.get('vibe') or 0)))
             rd_picks = sorted(unique_rd.values(), key=score_reddit, reverse=True)[:30]
 
-            # 4. Polymarket (Limit 80 | Tail_Risk 权重)
+            # 4. Polymarket (Tail_Risk 权重)
             poly_raw = supabase.table("raw_signals").select("*").eq("signal_type", "polymarket").order("created_at", desc=True).limit(800).execute().data or []
             unique_poly = {}
             for p in poly_raw:
@@ -119,7 +119,7 @@ class UniversalFactory:
         topic_id = row.get('url') or row.get('slug') or row.get('repo_name') or "unknown"
         source = row.get('signal_type', 'unknown').lower()
         
-        # 严格对齐你的格式逻辑
+        # 严格对齐格式
         parts = [f"【Source: {source.upper()}】"]
         if source == 'github':
             parts.append(f"项目: {row.get('repo_name')} | Stars: {row.get('stars')} | Topics: {row.get('topics')}")
@@ -138,6 +138,7 @@ class UniversalFactory:
         content = "\n".join(parts)
         ref_id = hashlib.sha256(content.encode()).hexdigest()
         
+        # 核心去重：如果今天审过，直接跳过，不花 API 钱
         if ref_id in processed_ids: return []
 
         results = []
@@ -149,7 +150,7 @@ class UniversalFactory:
 
         for name, mod in self.masters.items():
             prev_opinion = self.memory.get(topic_id, {}).get(name)
-            drift_context = f"\n\n[历史记忆]：你此前观点：'{prev_opinion}'。若数据变动触发逻辑反转，请在 Output 开头标记 [DRIFT_DETECTED]。" if prev_opinion else ""
+            drift_context = f"\n\n[历史记忆]：此前观点：'{prev_opinion}'。数据变动若触发逻辑反转，请在 Output 开头标记 [DRIFT_DETECTED]。" if prev_opinion else ""
             try:
                 if hasattr(mod, 'audit'):
                     row['_drift_context'] = drift_context
@@ -161,7 +162,6 @@ class UniversalFactory:
                             "drift": "[DRIFT_DETECTED]" in o,
                             "source": source, "thought": t, "output": o
                         }, ensure_ascii=False))
-                        print(f"💡 [{name}] {'🔄 改口' if '[DRIFT_DETECTED]' in o else '分析'}: {topic_id[:30]}...")
             except: continue
         return results
 
@@ -169,7 +169,7 @@ class UniversalFactory:
         self.vault_path = Path(vault_path)
         (self.vault_path / "instructions").mkdir(parents=True, exist_ok=True)
         
-        # 1. 跨时区去重锁：加载今日所有已处理 ID
+        # 1. 加载今日全天去重 ID
         processed_ids = self.build_day_memory(self.vault_path)
         
         now = datetime.now()
@@ -177,11 +177,11 @@ class UniversalFactory:
         hour_str = now.strftime('%H')
         output_file = self.vault_path / "instructions" / f"teachings_{day_str}_{hour_str}.jsonl"
 
-        # 2. 严格按 220 条左右进货
+        # 2. 筛选
         signals = self.fetch_elite_signals()
         if not signals: return
 
-        # 3. 处理并实时更新去重库
+        # 3. 审计并实时锁定 ID
         batch_size = 50
         for i in range(0, len(signals), batch_size):
             chunk = signals[i : i + batch_size]
@@ -192,7 +192,7 @@ class UniversalFactory:
             for r_list in res:
                 if r_list:
                     added.extend(r_list)
-                    # 关键修复：处理完立刻把 ID 锁死，防止本轮内重复录入
+                    # 实时存入，防止同一批次内由于 Supabase 延迟导致的重复
                     for r_json in r_list: processed_ids.add(json.loads(r_json).get('ref_id'))
             
             if added:
