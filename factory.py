@@ -17,10 +17,9 @@ class UniversalFactory:
         self.supabase_key = os.environ.get("SUPABASE_KEY")
         self.vault_path = None
         
-        # 🛡️ 校验配置
+        # 🛡️ 校验配置 (兼容测试模式)
         if not all([self.api_key, self.supabase_url, self.supabase_key]):
-            print("❌ [Factory] 启动失败: 环境变量缺失 (SILICON_FLOW_KEY, SUPABASE_URL, SUPABASE_KEY)")
-            # 兼容本地测试，不强制退出，但在 Action 里会报错
+            print("⚠️ [Factory] 警告: 环境变量缺失，部分功能可能受限。")
         
         # 🤖 模型设定：全员 V3
         self.v3_model = "deepseek-ai/DeepSeek-V3"
@@ -55,7 +54,7 @@ class UniversalFactory:
 
     def fetch_elite_signals(self):
         """
-        🌟 核心逻辑：精锐席位筛选 (220条)
+        🌟 核心逻辑：精锐席位筛选
         """
         try:
             supabase = create_client(self.supabase_url, self.supabase_key)
@@ -184,18 +183,19 @@ class UniversalFactory:
             return "ERROR", str(e)
 
     # =======================================================
-    # 🔥 核心修正：双向同步，确保追加不报错
+    # 🔥 核心修正：追加模式 + 防冲突拉链
     # =======================================================
     def git_push_assets(self):
         if not self.vault_path: return
         cwd = self.vault_path
         
-        # 1. 核心动作：先把云端最新的东西“拉”下来并合并 (Rebase)
-        # 这就是解决 "Updates were rejected" 的关键
         print("🔄 [Git] 正在同步云端数据 (追加模式)...")
+        
+        # 1. 关键：先把云端已有的数据拉下来合并 (Rebase)
+        # 这步能解决 "rejected" 报错
         subprocess.run(["git", "pull", "origin", "main", "--rebase"], cwd=cwd, check=False)
         
-        # 2. 添加本地的新数据
+        # 2. 正常添加本地数据
         subprocess.run(["git", "add", "."], cwd=cwd, check=False)
         
         # 3. 提交
@@ -203,15 +203,15 @@ class UniversalFactory:
             msg = f"🧠 Cognitive Audit: {datetime.now().strftime('%H:%M:%S')}"
             subprocess.run(["git", "commit", "-m", msg], cwd=cwd, check=False)
             
-            # 4. 双重保险：推之前再拉一次，防止刚才这几秒云端又变了
+            # 4. 双重保险：推之前再拉一次，防止刚才几秒内云端又变了
             subprocess.run(["git", "pull", "origin", "main", "--rebase"], cwd=cwd, check=False)
             
-            # 5. 放心推送
+            # 5. 推送
             res = subprocess.run(["git", "push", "origin", "main"], cwd=cwd, check=False)
             if res.returncode == 0:
                 print("✅ [Git] 资产已追加上传！")
             else:
-                print("❌ [Git] 上传失败，请检查网络。")
+                print("❌ [Git] 上传失败，请检查 GitHub Action 权限或网络。")
         else:
             print("💤 [Git] 没有新内容需要上传。")
 
@@ -293,7 +293,8 @@ class UniversalFactory:
         batch_size = 50
         for i in range(0, len(signals), batch_size):
             chunk = signals[i : i + batch_size]
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            # ⚡️ 极速模式：20线程并发，提升处理速度
+            with ThreadPoolExecutor(max_workers=20) as executor:
                 res = list(executor.map(lambda r: self.audit_process(r, processed_ids), chunk))
             
             added = []
@@ -304,7 +305,7 @@ class UniversalFactory:
                 with open(output_file, 'a', encoding='utf-8') as f:
                     f.write('\n'.join(added) + '\n')
                 print(f"✨ 批次 {i//batch_size + 1} 完成 | 产出 {len(added)} 条认知资产")
-                self.git_push_assets() # 50条一存
+                self.git_push_assets() # 50条一存 (此时会触发上面的防撞逻辑)
 
         print("🏁 任务完成。")
 
