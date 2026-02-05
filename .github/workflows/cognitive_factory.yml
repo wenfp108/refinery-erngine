@@ -1,6 +1,6 @@
 name: 🧠 Cognitive Factory (Event Driven)
 
-# 🔥 核心逻辑：监听 "Refinery Engine" 的结束事件
+# 🔥 核心逻辑：监听 "🚀 Refinery Engine (Hourly)" 的结束事件
 # 这样实现了真正的 "Pipeline"（流水线）模式，绝对不会撞车
 on:
   workflow_run:
@@ -15,16 +15,16 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write     # 允许提交代码
+      contents: write     # 允许提交代码到中央银行
 
     steps:
-      # 1️⃣ 检出加工厂 (Refinery-Engine) - 也就是当前仓库
+      # 1️⃣ 检出加工厂 (Refinery-Engine) - 当前仓库
       - name: Checkout Refinery (Self)
         uses: actions/checkout@v4
         with:
           path: refinery
 
-      # 2️⃣ 检出大师逻辑 (Masters-Council) - 私有库，需要 PAT
+      # 2️⃣ 检出大师逻辑 (Masters-Council) - 私有库
       - name: Checkout Masters (Logic)
         uses: actions/checkout@v4
         with:
@@ -32,7 +32,7 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           path: masters_repo
 
-      # 3️⃣ 检出中央银行 (Central-Bank) - 私有库，需要 PAT
+      # 3️⃣ 检出中央银行 (Central-Bank) - 私有库
       - name: Checkout Vault (Storage)
         uses: actions/checkout@v4
         with:
@@ -40,15 +40,16 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           path: vault
 
-      # 4️⃣ 环境准备：把大师逻辑 "安装" 到加工厂里
-      - name: Install Masters Plugin
+      # 4️⃣ 环境准备：装载大师插件并安装增强版依赖
+      - name: Setup Environment
         run: |
-          # 创建存放插件的目录
+          # 创建存放插件的目录并复制
           mkdir -p refinery/masters
-          # 将私有库里的大师代码复制过去
           cp -r masters_repo/masters/*.py refinery/masters/
-          echo "✅ 大师逻辑已装载："
-          ls -l refinery/masters/
+          echo "✅ 大师插件装载完毕"
+          
+          # 设置 Python 环境
+          echo "python_version=3.9" >> $GITHUB_ENV
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -57,19 +58,22 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install pandas pyarrow supabase PyGithub
+          # ✅ 补充了 requests (用于API调用) 和 pytz (用于时区处理)
+          pip install pandas pyarrow supabase PyGithub requests pytz
 
-      # 5️⃣ 启动认知工厂
+      # 5️⃣ 启动认知工厂：注入核心 Secrets
       - name: Run Cognitive Factory
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # ✅ 必须注入此变量，否则大师会报 API_ERROR
+          SILICON_FLOW_KEY: ${{ secrets.SILICON_FLOW_KEY }} 
         run: |
           cd refinery
           # 运行调度脚本，开始加工最近1小时的数据
           python run_factory.py
 
-      # 6️⃣ 资产入库：将生成的 jsonl 推送到中央银行
+      # 6️⃣ 资产入库：将生成的 jsonl 永久存入中央银行
       - name: Ship to Central Bank
         run: |
           cd vault
@@ -77,12 +81,13 @@ jobs:
           git config --global user.name "Cognitive Bot"
           git config --global user.email "bot@wenfp108.com"
           
-          # 检查 instructions 文件夹是否有变动
+          # 检查 instructions/ 目录下是否有新产生的认知资产 (jsonl)
+          # 注意：factory.py 会按月生成文件名，如 teachings_202602.jsonl
           if [[ -n $(git status -s instructions/) ]]; then
             git add instructions/
-            git commit -m "🧠 Cognitive Audit: New insights generated from hash_id"
+            git commit -m "🧠 Cognitive Audit: New insights generated at $(date +'%Y-%m-%d %H:%M')"
             git push
-            echo "✅ 认知资产已押运至中央银行。"
+            echo "✅ 顶级认知资产已押运至中央银行。"
           else
-            echo "💤 本轮大师没有产生新见解 (无变动)。"
+            echo "💤 本轮扫描未发现足够触发大师审计的信号 (无变动)。"
           fi
