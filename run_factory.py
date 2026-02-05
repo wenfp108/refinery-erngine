@@ -1,17 +1,18 @@
 import os
+import json
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
-from factory import UniversalFactory  # 导入你的通用工厂类
+from factory import UniversalFactory  # 导入通用工厂类
 
 # === ⚙️ 配置区 ===
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# 你的中央银行在 GitHub Action 里的相对路径 (根据 workflow 配置)
+# 你的中央银行在 GitHub Action 里的相对路径
 VAULT_PATH = "../vault"
 
-# 你所有的情报源表名 (需要与 processors 里的 TABLE_NAME 一致)
+# 你所有的情报源表名
 TARGET_TABLES = [
     "polymarket_logs",
     "twitter_logs",
@@ -23,23 +24,18 @@ TARGET_TABLES = [
 def fetch_fresh_data(table_name, minutes=70):
     """
     从指定表捞取最近 N 分钟的数据
-    (70分钟是为了稍微覆盖整点，防止边缘数据遗漏)
     """
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # 计算时间阈值 (UTC 时间，因为 Supabase 内部通常存 UTC 或带时区的 ISO)
-        # 注意：这里假设你的 bj_time 是 ISO 格式字符串
-        # 为了保险，我们用当前时间减去 70 分钟的 ISO 字符串进行字符串比较
-        # (只要格式是标准的 ISO 8601，字符串比较就是有效的)
-        cutoff_time = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        # ✅ 修复：强制对齐北京时间 (UTC+8)
+        # 确保与 refinery.py 写入的 bj_time 格式一致，避免字符串比较时出现 8 小时偏差
+        bj_now = datetime.now(timezone(timedelta(hours=8)))
+        cutoff_time = (bj_now - timedelta(minutes=minutes)).isoformat()
         
-        # 兼容性处理：如果你的 bj_time 是 +08:00，这里最好也转换一下
-        # 简单起见，这里直接利用 Supabase 的过滤器
+        print(f"🎣 [{table_name}] 正在扫描新数据 (阈值: {cutoff_time})...")
         
-        print(f"🎣 [{table_name}] 正在扫描新数据...")
-        
-        # 限制单次最大获取 1000 条，防止内存爆
+        # 限制单次最大获取 1000 条
         res = supabase.table(table_name)\
             .select("*")\
             .gt("bj_time", cutoff_time)\
@@ -59,7 +55,8 @@ def fetch_fresh_data(table_name, minutes=70):
         return []
 
 def main():
-    print(f"🚀 [Cognitive Factory] 启动时间: {datetime.now().isoformat()}")
+    bj_now_str = datetime.now(timezone(timedelta(hours=8))).isoformat()
+    print(f"🚀 [Cognitive Factory] 启动时间: {bj_now_str}")
     
     all_signals = []
     
@@ -75,21 +72,33 @@ def main():
 
     print(f"📦 原料准备完毕，共计 {len(all_signals)} 条混合信号。")
 
-    # 2. 转换为 DataFrame 并保存为临时 Parquet
-    # (Factory 只吃 Parquet，这样可以保持接口统一)
+    # 2. 转换为 DataFrame 并进行预处理
     df = pd.DataFrame(all_signals)
     temp_file = "temp_run_batch.parquet"
     
-    # 兼容性：确保 numeric 字段是数字类型，防止报错
-    for col in ['volume', 'liquidity', 'vol24h', 'day_change', 'stars', 'citations']:
+    # ✅ 核心修复：强制将 raw_json 列转换为纯字符串格式
+    # 解决 pyarrow 无法混合处理 dict 和 string 导致的 ArrowInvalid 报错
+    if 'raw_json' in df.columns:
+        df['raw_json'] = df['raw_json'].apply(
+            lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (dict, list)) else str(x)
+        )
+    
+    # 兼容性：确保数值字段类型统一，防止空值报错
+    numeric_cols = ['volume', 'liquidity', 'vol24h', 'day_change', 'stars', 'citations', 'score']
+    for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
-    df.to_parquet(temp_file)
+    # 保存为临时 Parquet
+    try:
+        df.to_parquet(temp_file, engine='pyarrow', index=False)
+    except Exception as e:
+        print(f"❌ Parquet 写入失败 (数据结构异常): {e}")
+        return
 
     # 3. 唤醒大师，开工
-    # masters_path="masters" 对应 workflow 里复制过来的插件目录
     try:
+        # masters_path="masters" 对应 workflow 里复制过来的插件目录
         factory = UniversalFactory(masters_path="masters")
         
         print("🏭 流水线全速运转中...")
@@ -102,7 +111,7 @@ def main():
         print(f"❌ 工厂运行严重错误: {e}")
         
     finally:
-        # 4. 清理现场 (焚烧临时文件)
+        # 4. 清理现场
         if os.path.exists(temp_file):
             os.remove(temp_file)
             print("🧹 临时文件已清理。")
