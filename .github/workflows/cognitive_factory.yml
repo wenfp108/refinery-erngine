@@ -1,0 +1,88 @@
+name: 🧠 Cognitive Factory (Event Driven)
+
+# 🔥 核心逻辑：监听 "Refinery Engine" 的结束事件
+# 这样实现了真正的 "Pipeline"（流水线）模式，绝对不会撞车
+on:
+  workflow_run:
+    workflows: ["🚀 Refinery Engine (Hourly)"] # 必须与 refinery.yml 里的 name 完全一致
+    types:
+      - completed
+  workflow_dispatch:      # 保留手动按钮，方便测试
+
+jobs:
+  audit_and_ship:
+    # 只有当抓取任务成功时才运行 (防止抓取失败了还去加工空数据)
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # 允许提交代码
+
+    steps:
+      # 1️⃣ 检出加工厂 (Refinery-Engine) - 也就是当前仓库
+      - name: Checkout Refinery (Self)
+        uses: actions/checkout@v4
+        with:
+          path: refinery
+
+      # 2️⃣ 检出大师逻辑 (Masters-Council) - 私有库，需要 PAT
+      - name: Checkout Masters (Logic)
+        uses: actions/checkout@v4
+        with:
+          repository: wenfp108/Masters-Council
+          token: ${{ secrets.GH_PAT }}
+          path: masters_repo
+
+      # 3️⃣ 检出中央银行 (Central-Bank) - 私有库，需要 PAT
+      - name: Checkout Vault (Storage)
+        uses: actions/checkout@v4
+        with:
+          repository: wenfp108/Central-Bank
+          token: ${{ secrets.GH_PAT }}
+          path: vault
+
+      # 4️⃣ 环境准备：把大师逻辑 "安装" 到加工厂里
+      - name: Install Masters Plugin
+        run: |
+          # 创建存放插件的目录
+          mkdir -p refinery/masters
+          # 将私有库里的大师代码复制过去
+          cp -r masters_repo/masters/*.py refinery/masters/
+          echo "✅ 大师逻辑已装载："
+          ls -l refinery/masters/
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install pandas pyarrow supabase PyGithub
+
+      # 5️⃣ 启动认知工厂
+      - name: Run Cognitive Factory
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          cd refinery
+          # 运行调度脚本，开始加工最近1小时的数据
+          python run_factory.py
+
+      # 6️⃣ 资产入库：将生成的 jsonl 推送到中央银行
+      - name: Ship to Central Bank
+        run: |
+          cd vault
+          # 配置 Bot 身份
+          git config --global user.name "Cognitive Bot"
+          git config --global user.email "bot@wenfp108.com"
+          
+          # 检查 instructions 文件夹是否有变动
+          if [[ -n $(git status -s instructions/) ]]; then
+            git add instructions/
+            git commit -m "🧠 Cognitive Audit: New insights generated from hash_id"
+            git push
+            echo "✅ 认知资产已押运至中央银行。"
+          else
+            echo "💤 本轮大师没有产生新见解 (无变动)。"
+          fi
