@@ -16,15 +16,8 @@ class UniversalFactory:
         self.supabase_key = os.environ.get("SUPABASE_KEY")
         self.vault_path = None
         
-        # 模型设定
+        # 🤖 模型设定：全员 V3，废弃 Scout
         self.v3_model = "deepseek-ai/DeepSeek-V3"
-        self.free_model = "Qwen/Qwen2.5-7B-Instruct"
-        
-        # 🔥 高价值关键词保送名单
-        self.priority_keywords = [
-            'Iran', 'Trump', 'Fed', 'Powell', 'War', 'Strike', 'Nominate', 
-            'Solana', 'BTC', 'NVIDIA', 'LLM', 'Paper', 'GitHub', 'Exploit'
-        ]
 
     def _load_masters(self):
         import importlib.util
@@ -42,53 +35,171 @@ class UniversalFactory:
         return masters
 
     def configure_git(self):
-        """确保 GitHub Actions 身份合法，防止 Exit 128"""
         if not self.vault_path: return
-        cwd = self.vault_path
         subprocess.run(["git", "config", "--global", "user.email", "bot@factory.com"], check=False)
         subprocess.run(["git", "config", "--global", "user.name", "Cognitive Bot"], check=False)
 
-    def fetch_elite_signals(self, total_limit=300):
-        """🌟 核心逻辑：稀缺源优先 + 质量过滤"""
+    def fetch_elite_signals(self):
+        """
+        🌟 核心逻辑：180 精锐席位 (Elite Squad 180)
+        特性：
+        1. 去重盾 (Dedup Shield): Polymarket 按 Slug 去重
+        2. 狙击手保护 (Sniper Protection): Sniper 信号独立加权
+        3. 标签雷达 (Smart Radar): 强制插队经济/科学/科技
+        4. 板块熔断 (Subreddit Cap): Reddit 每个板块限 3 条
+        """
         try:
             supabase = create_client(self.supabase_url, self.supabase_key)
-            print("💎 正在从 SQL 执行‘精英数据’筛选...")
+            print("💎 启动精锐筛选 (目标: ~180 条 | 启用严格去重)...")
 
-            # 1. 捞干 GitHub 和 Paper (全量收割)
-            rare_signals = supabase.table("raw_signals") \
+            # ==========================================
+            # 1. GitHub & Paper: 全量 (上限 50)
+            # ==========================================
+            rare_raw = supabase.table("raw_signals") \
                 .select("*") \
-                .or("signal_type.eq.github,signal_type.eq.paper") \
+                .or_("signal_type.eq.github,signal_type.eq.paper") \
                 .order("created_at", desc=True) \
-                .limit(60).execute().data or []
+                .limit(50).execute().data or []
+            
+            # 简单去重 (保留最新)
+            unique_rare = {}
+            for r in rare_raw:
+                k = r.get('repo_name') or r.get('title')
+                if k and k not in unique_rare: unique_rare[k] = r
+            rare_picks = list(unique_rare.values())
+            print(f"🔹 稀缺源: {len(rare_picks)} 条")
 
-            # 2. 精选 Twitter/Reddit (长文 + 高赞)
-            social_signals = supabase.table("raw_signals") \
-                .select("*") \
-                .or("signal_type.eq.twitter,signal_type.eq.reddit") \
-                .gt("likes", 5) \
-                .order("likes", desc=True) \
-                .limit(100).execute().data or []
+            # ==========================================
+            # 2. Twitter: Top 60 (VIP + Viral)
+            # ==========================================
+            tw_raw = supabase.table("raw_signals").select("*").eq("signal_type", "twitter").order("created_at", desc=True).limit(500).execute().data or []
+            vip_list = ['Karpathy', 'Musk', 'Vitalik', 'LeCun', 'Dalio', 'Naval', 'Sama', 'PaulG']
+            
+            def score_twitter(row):
+                rt = row.get('retweets') or 0
+                bm = row.get('bookmarks') or 0
+                like = row.get('likes') or 0
+                user = str(row.get('user_name', '')).lower()
+                
+                # 基础分：(RT x 5) + (BM x 10) + Like
+                # 🔧 修正：应对数据中 Bookmark 为 0 的情况，如果 RT 极高，给予额外补偿
+                score = (rt * 5) + (bm * 10) + like
+                if rt > 10000: score += 5000  # 病毒式传播补偿
+                
+                # VIP 加权
+                is_vip = any(v.lower() in user for v in vip_list)
+                if is_vip:
+                    # 只有当 VIP 的推文稍微有点热度时才加分，防止垃圾刷屏
+                    if rt > 10 or like > 50: score += 10000
+                    else: score += 500 # 纯水贴只加一点点
+                
+                return score
 
-            # 3. Polymarket 兜底 (只看大资金池)
-            remain = total_limit - len(rare_signals) - len(social_signals)
-            poly_signals = supabase.table("raw_signals") \
-                .select("*") \
-                .eq("signal_type", "polymarket") \
-                .gt("liquidity", 5000) \
-                .order("liquidity", desc=True) \
-                .limit(max(0, remain)).execute().data or []
+            for r in tw_raw: r['_rank'] = score_twitter(r)
+            tw_picks = sorted(tw_raw, key=lambda x:x['_rank'], reverse=True)[:60]
+            print(f"🔹 Twitter: {len(tw_picks)} 条")
 
-            all_data = rare_signals + social_signals + poly_signals
-            print(f"📊 构成比例：GitHub/Paper({len(rare_signals)}) | Social({len(social_signals)}) | Poly({len(poly_signals)})")
-            return all_data
+            # ==========================================
+            # 3. Reddit: Top 30 (去重 + 板块熔断)
+            # ==========================================
+            rd_raw = supabase.table("raw_signals").select("*").eq("signal_type", "reddit").order("created_at", desc=True).limit(500).execute().data or []
+
+            # A. URL 去重
+            unique_rd_map = {}
+            for r in rd_raw:
+                url = r.get('url')
+                if not url: continue
+                curr_score = r.get('score') or 0
+                if url not in unique_rd_map or curr_score > (unique_rd_map[url].get('score') or 0):
+                    unique_rd_map[url] = r
+            deduplicated_rd = list(unique_rd_map.values())
+
+            # B. 打分
+            def score_reddit(row):
+                s = row.get('score') or 0
+                v = abs(float(row.get('vibe') or 0))
+                return s * (1 + v)
+
+            sorted_rd = sorted(deduplicated_rd, key=score_reddit, reverse=True)
+            
+            # C. 板块熔断 (每个 Subreddit 限 3 条)
+            rd_picks = []
+            sub_counts = {}
+            for r in sorted_rd:
+                if len(rd_picks) >= 30: break
+                sub = str(r.get('subreddit', 'unknown')).lower()
+                if sub_counts.get(sub, 0) >= 3: continue
+                rd_picks.append(r)
+                sub_counts[sub] = sub_counts.get(sub, 0) + 1
+            
+            print(f"🔹 Reddit: {len(rd_picks)} 条 (Top 30 | 已熔断)")
+
+            # ==========================================
+            # 4. Polymarket: Top 60 (去重 + 智能分层)
+            # ==========================================
+            poly_raw = supabase.table("raw_signals").select("*").eq("signal_type", "polymarket").order("created_at", desc=True).limit(800).execute().data or []
+
+            # A. Slug 去重
+            unique_poly_map = {}
+            for p in poly_raw:
+                raw = p.get('raw_json')
+                if isinstance(raw, str): 
+                    try: raw = json.loads(raw)
+                    except: raw = {}
+                p['_parsed'] = raw
+                
+                slug = p.get('slug') or raw.get('slug')
+                if not slug: continue
+                
+                curr_liq = float(p.get('liquidity') or raw.get('liquidity') or 0)
+                
+                if slug not in unique_poly_map:
+                    unique_poly_map[slug] = p
+                else:
+                    prev_liq = float(unique_poly_map[slug].get('liquidity') or unique_poly_map[slug]['_parsed'].get('liquidity') or 0)
+                    if curr_liq > prev_liq: unique_poly_map[slug] = p
+            
+            deduplicated_poly = list(unique_poly_map.values())
+
+            # B. 智能打分 (四级准入)
+            def score_poly(row):
+                raw = row['_parsed']
+                tags = raw.get('strategy_tags', [])
+                cat = str(row.get('category', '') or raw.get('category', '')).upper()
+                engine = str(row.get('engine', '') or raw.get('engine', '')).lower()
+                liq = float(row.get('liquidity') or raw.get('liquidity') or 0)
+
+                base = 0
+                # 👑 Tier 1: 黑天鹅
+                if 'TAIL_RISK' in tags: base = 10_000_000
+                # 🚀 Tier 2: 核心叙事 (ECONOMY/SCIENCE/TECH)
+                elif any(x in cat for x in ['ECONOMY', 'SCIENCE', 'CLIMATE', 'TECH', 'FINANCE']): base = 5_000_000
+                # 🔫 Tier 3: Sniper 保护
+                elif 'sniper' in engine and liq > 10000: base = 2_000_000
+                # 💰 Tier 4: 大资金
+                elif liq > 500_000: base = 1_000_000
+                
+                return base + liq
+
+            for r in deduplicated_poly: r['_rank'] = score_poly(r)
+            poly_picks = sorted(deduplicated_poly, key=lambda x:x['_rank'], reverse=True)[:60]
+            print(f"🔹 Polymarket: {len(poly_picks)} 条 (Top 60)")
+
+            # ==========================================
+            # 5. 最终集结
+            # ==========================================
+            final_batch = rare_picks + tw_picks + rd_picks + poly_picks
+            print(f"🚀 全域精锐: {len(final_batch)} 条 (去重完毕)")
+            return final_batch
+
         except Exception as e:
-            print(f"⚠️ SQL 筛选失败: {e}，将尝试全量兜底...")
+            print(f"⚠️ 筛选异常: {e} (启动安全模式)")
             return []
 
     def call_ai(self, model, sys, usr):
         if not self.api_key: return "ERROR", "No Key"
         # 🧠 注入‘逻辑接骨’指令
-        enhanced_sys = sys + "\n[重要]：若输入信号断档，请基于你的知识库推演缺失逻辑。在 Thought 中展示接骨过程。"
+        enhanced_sys = sys + "\n[重要]：你现在是首席审计官。不要像机器人一样总结，要像索罗斯/芒格一样思考。若信号断档，请基于你的知识库推演背景。"
         payload = {
             "model": model, "messages": [{"role": "system", "content": enhanced_sys}, {"role": "user", "content": usr}],
             "temperature": 0.7, "max_tokens": 1500
@@ -108,55 +219,55 @@ class UniversalFactory:
             subprocess.run(["git", "push"], cwd=cwd)
 
     def audit_process(self, row, processed_ids):
-        # 🔥 强化版多源内容拼接
+        # === 1. 构建上下文 ===
         source = row.get('signal_type', 'unknown').lower()
         parts = [f"【Source: {source.upper()}】"]
         
+        # 增强上下文构建
         if source == 'github':
             parts.append(f"项目: {row.get('repo_name')} | Stars: {row.get('stars')} | Topics: {row.get('topics')}")
             parts.append(f"描述: {row.get('full_text') or '新项目发布'}")
+            parts.append(f"Link: {row.get('url')}")
         elif source == 'paper':
             parts.append(f"论文: {row.get('title')} | 期刊: {row.get('journal')}")
+            parts.append(f"引用: {row.get('citations')}")
             parts.append(f"摘要: {row.get('full_text')}")
         elif source in ['twitter', 'reddit']:
-            parts.append(f"用户: @{row.get('screen_name')} | 内容: {row.get('full_text')}")
+            parts.append(f"用户: {row.get('user_name') or row.get('subreddit')} | Score: {row.get('_rank',0)}")
+            parts.append(f"内容: {row.get('full_text') or row.get('title')}")
         else: # Polymarket
-            parts.append(f"预测: {row.get('question')} | 流动性: {row.get('liquidity')} | 价格: {row.get('prices')}")
+            raw = row.get('raw_json')
+            if isinstance(raw, str): 
+                try: raw = json.loads(raw)
+                except: raw = {}
+            parts.append(f"预测: {row.get('title')} | 问题: {row.get('question')}")
+            parts.append(f"价格: {row.get('prices')} | 流动性: ${raw.get('liquidity')}")
+            parts.append(f"标签: {raw.get('strategy_tags')} | 分类: {row.get('category')}")
 
         content = "\n".join(parts)
         ref_id = hashlib.sha256(content.encode()).hexdigest()
         
-        # 智能去重
-        if ref_id in processed_ids or len(content) < 15: return []
-
-        # 1. 评分分流
-        scout_sys = "你是一个高价值信息初筛官。打分(0-100)。只要涉及宏观博弈、技术转折或大资金动态就给高分。只回数字。"
-        _, score_reply = self.call_ai(self.free_model, scout_sys, content[:1000])
-        try: score = int(''.join(filter(str.isdigit, score_reply)))
-        except: score = 50
-        
-        # 关键词保送
-        if any(kw.lower() in content.lower() for kw in self.priority_keywords):
-            score = max(score, 90)
+        if ref_id in processed_ids: return []
 
         results = []
-        # 2. 大师审计 (V3)
-        if score >= 85:
-            def ask_v3(s, u):
-                st, r = self.call_ai(self.v3_model, s, u)
-                if st == "SUCCESS" and "### Output" in r:
-                    return r.split("### Output")[0].replace("### Thought","").strip(), r.split("### Output")[1].strip()
-                return "逻辑推演", r
-            
-            for name, mod in self.masters.items():
-                try:
+        # === 2. 强制 V3 审计 (No Scout) ===
+        def ask_v3(s, u):
+            st, r = self.call_ai(self.v3_model, s, u)
+            if st == "SUCCESS" and "### Output" in r:
+                return r.split("### Output")[0].replace("### Thought","").strip(), r.split("### Output")[1].strip()
+            if st == "SUCCESS": return "Deep Dive", r
+            return None, None
+        
+        for name, mod in self.masters.items():
+            try:
+                if hasattr(mod, 'audit'):
                     t, o = mod.audit(row, ask_v3)
                     if t and o:
                         results.append(json.dumps({
                             "ref_id": ref_id, "type": "V3_MASTER", "source": source,
-                            "master": name, "input": content[:150].replace('\n',' '), "thought": t, "output": o
+                            "master": name, "input": content[:300].replace('\n',' '), "thought": t, "output": o
                         }, ensure_ascii=False))
-                except: continue
+            except: continue
         return results
 
     def process_and_ship(self, input_raw, vault_path):
@@ -173,14 +284,13 @@ class UniversalFactory:
                     try: processed_ids.add(json.loads(line).get('ref_id'))
                     except: pass
 
-        # 抓取精英信号
-        signals = self.fetch_elite_signals(total_limit=300)
+        # 🌟 获取 180 精锐信号
+        signals = self.fetch_elite_signals()
         if not signals:
-            print("🔄 SQL 抓取为空，尝试读取本地缓存文件...")
-            df = pd.read_parquet(input_raw)
-            signals = df.head(300).to_dict('records')
+            print("💤 本轮无新信号入库。")
+            return
 
-        print(f"🚀 工厂开工！目标：300 条精华审计。")
+        print(f"🚀 工厂全速运转: {len(signals)} 条 V3 级审计正在进行...")
 
         batch_size = 50
         for i in range(0, len(signals), batch_size):
@@ -195,8 +305,7 @@ class UniversalFactory:
             if added:
                 with open(output_file, 'a', encoding='utf-8') as f:
                     f.write('\n'.join(added) + '\n')
-                    f.flush()
-                print(f"✨ 批次 {i//50 + 1} 完成 | 新增 {len(added)} 条大师级资产。")
-                self.git_push_assets() # ✅ 50条一押运
+                print(f"✨ 批次 {i//50 + 1} 完成 | 产出 {len(added)} 条认知资产")
+                self.git_push_assets() # 50条一存
 
-        print("🏁 全量多源精英收割任务圆满完成。")
+        print("🏁 任务完成。")
