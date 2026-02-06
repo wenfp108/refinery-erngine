@@ -63,25 +63,36 @@ class UniversalFactory:
             supabase = create_client(self.supabase_url, self.supabase_key)
             print("💎 启动 2 小时一度精锐筛选...")
 
-            # 1. GitHub & Paper (各保底 20 条)
-            print("💎 正在分别获取 GitHub 和 Paper 信号...")
+            # === 1. GitHub 信号独立处理 (保底 20 条) ===
+            print("💎 正在获取 GitHub 信号...")
+            github_raw = supabase.table("raw_signals").select("*").eq("signal_type", "github").order("created_at", desc=True).limit(50).execute().data or []
             
-            # A. 抓取 GitHub (前20)
-            github_raw = supabase.table("raw_signals").select("*").eq("signal_type", "github").order("created_at", desc=True).limit(20).execute().data or []
+            unique_github = {}
+            for r in github_raw:
+                # GitHub 专属去重键：repo_name
+                name = r.get('repo_name')
+                if name and name not in unique_github:
+                    unique_github[name] = r
             
-            # B. 抓取 Papers (前30) - 这样就算 GitHub 有100条新数据，Paper 也能稳拿30个席位
-            paper_raw = supabase.table("raw_signals").select("*").eq("signal_type", "papers").order("created_at", desc=True).limit(30).execute().data or []
+            github_picks = list(unique_github.values())[:20]  # 精准截取前 20
+            print(f"✅ GitHub 处理完成：去重后获 {len(github_picks)} 条")
 
-            # C. 合并数据
-            rare_raw = github_raw + paper_raw
+            # === 2. Paper 信号独立处理 (保底 30 条) ===
+            print("💎 正在获取 Paper 信号...")
+            paper_raw = supabase.table("raw_signals").select("*").eq("signal_type", "papers").order("created_at", desc=True).limit(50).execute().data or []
+            
+            unique_paper = {}
+            for r in paper_raw:
+                # Paper 专属去重键：title
+                title = r.get('title')
+                if title and title not in unique_paper:
+                    unique_paper[title] = r
+            
+            paper_picks = list(unique_paper.values())[:30]  # 精准截取前 30
+            print(f"✅ Paper 处理完成：去重后获 {len(paper_picks)} 条")
 
-            # D. 去重逻辑 (保持不变)
-            unique_rare = {}
-            for r in rare_raw:
-                # GitHub用 repo_name 做主键，Paper 用 title 做主键
-                k = r.get('repo_name') or r.get('title')
-                if k and k not in unique_rare: unique_rare[k] = r
-            rare_picks = list(unique_rare.values())
+            # === 3. 最终汇总 (仅用于后续循环) ===
+            rare_picks = github_picks + paper_picks
 
             # 2. Twitter (VIP 权重)
             tw_raw = supabase.table("raw_signals").select("*").eq("signal_type", "twitter").order("created_at", desc=True).limit(500).execute().data or []
