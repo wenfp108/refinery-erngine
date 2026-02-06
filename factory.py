@@ -65,8 +65,8 @@ class UniversalFactory:
 
             # === 1. GitHub 信号独立处理 (保底 20 条) ===
             print("💎 正在获取 GitHub 信号...")
-            # limit(50) 是为了多抓取一些生肉，防止去重后不够 20 条
-            github_raw = supabase.table("raw_signals").select("*").eq("signal_type", "github").order("created_at", desc=True).limit(50).execute().data or []
+            # 这里的 limit 改成了 100，多抓点更保险
+            github_raw = supabase.table("raw_signals").select("*").eq("signal_type", "github").order("created_at", desc=True).limit(100).execute().data or []
             
             unique_github = {}
             for r in github_raw:
@@ -75,29 +75,30 @@ class UniversalFactory:
                 if name and name not in unique_github:
                     unique_github[name] = r
             
-            # 独立截断：确保 GitHub 稳拿前 20
-            github_picks = list(unique_github.values())[:20]
-            print(f"✅ GitHub 处理完成：去重后获 {len(github_picks)} 条")
+            github_picks = list(unique_github.values())[:20]  # 稳拿 20 条
+            print(f"✅ GitHub 独立处理完成：获 {len(github_picks)} 条")
 
             # === 2. Paper 信号独立处理 (保底 30 条) ===
             print("💎 正在获取 Paper 信号...")
-            # limit(50) 同理，为了保底
-            paper_raw = supabase.table("raw_signals").select("*").eq("signal_type", "papers").order("created_at", desc=True).limit(50).execute().data or []
+            # 这里的 limit 也改成了 100
+            paper_raw = supabase.table("raw_signals").select("*").eq("signal_type", "papers").order("created_at", desc=True).limit(100).execute().data or []
             
             unique_paper = {}
             for r in paper_raw:
-                # Paper 专属去重键：title
-                title = r.get('title')
+                # Paper 专属去重键：title (增加防御逻辑，防止因为没标题被扔掉)
+                title = r.get('title') or r.get('headline')
+                
+                # 如果没标题，强行截取正文前30字当标题，确保数据不丢失
+                if not title and r.get('full_text'):
+                    title = r.get('full_text')[:30]
+
                 if title and title not in unique_paper:
+                    # 🚨 关键修复：把找到的标题写回 r，防止后面生成 Prompt 时 title 还是 None
+                    r['title'] = title 
                     unique_paper[title] = r
             
-            # 独立截断：确保 Paper 稳拿前 30
-            paper_picks = list(unique_paper.values())[:30]
-            print(f"✅ Paper 处理完成：去重后获 {len(paper_picks)} 条")
-
-            # === 3. 最终汇总 (仅用于后续循环) ===
-            # 这里合并的是已经处理干净的成品列表，不会再有冲突
-            rare_picks = github_picks + paper_picks
+            paper_picks = list(unique_paper.values())[:30]  # 稳拿 30 条
+            print(f"✅ Paper 独立处理完成：获 {len(paper_picks)} 条")
 
             # === 4. Twitter (VIP 权重) - 保持原样 ===
             tw_raw = supabase.table("raw_signals").select("*").eq("signal_type", "twitter").order("created_at", desc=True).limit(500).execute().data or []
