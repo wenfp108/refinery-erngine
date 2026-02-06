@@ -58,7 +58,7 @@ class UniversalFactory:
         return day_processed_ids
 
     def fetch_elite_signals(self):
-        """🌟 严格保留你的原装权重 40/60/30/80"""
+        """🌟 严格保留你的原装权重 50/60/30/80"""
         try:
             supabase = create_client(self.supabase_url, self.supabase_key)
             print("💎 启动 2 小时一度精锐筛选...")
@@ -69,8 +69,8 @@ class UniversalFactory:
             # A. 抓取 GitHub (前20)
             github_raw = supabase.table("raw_signals").select("*").eq("signal_type", "github").order("created_at", desc=True).limit(20).execute().data or []
             
-            # B. 抓取 Paper (前20) - 这样就算 GitHub 有100条新数据，Paper 也能稳拿20个席位
-            paper_raw = supabase.table("raw_signals").select("*").eq("signal_type", "papers").order("created_at", desc=True).limit(20).execute().data or []
+            # B. 抓取 Papers (前30) - 这样就算 GitHub 有100条新数据，Paper 也能稳拿30个席位
+            paper_raw = supabase.table("raw_signals").select("*").eq("signal_type", "papers").order("created_at", desc=True).limit(30).execute().data or []
 
             # C. 合并数据
             rare_raw = github_raw + paper_raw
