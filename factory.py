@@ -101,6 +101,7 @@ class UniversalFactory:
             print(f"✅ Paper 独立处理完成：获 {len(paper_picks)} 条")
 
             # === 3. Twitter (VIP 权重) - 保持原样 ===
+            print("💎 正在获取 Twitter 信号...")
             tw_raw = supabase.table("raw_signals").select("*").eq("signal_type", "twitter").order("created_at", desc=True).limit(500).execute().data or []
             vip_list = ['Karpathy', 'Musk', 'Vitalik', 'LeCun', 'Dalio', 'Naval', 'Sama', 'PaulG']
             def score_twitter(row):
@@ -115,6 +116,7 @@ class UniversalFactory:
             print(f"✅ Twitter 处理完成：获 {len(tw_picks)} 条")
 
             # === 4. Reddit (Vibe 权重) - 保持原样 ===
+            print("💎 正在获取 Reddit 信号...")
             rd_raw = supabase.table("raw_signals").select("*").eq("signal_type", "reddit").order("created_at", desc=True).limit(500).execute().data or []
             unique_rd = {r.get('url'): r for r in rd_raw if r.get('url')}
             def score_reddit(row): return (row.get('score') or 0) * (1 + abs(float(row.get('vibe') or 0)))
@@ -122,6 +124,7 @@ class UniversalFactory:
             print(f"✅ Reddit 处理完成：获 {len(rd_picks)} 条")
 
             # === 5. Polymarket (Tail_Risk 权重) - 保持原样 ===
+            print("💎 正在获取 Polymarket 信号...")
             poly_raw = supabase.table("raw_signals").select("*").eq("signal_type", "polymarket").order("created_at", desc=True).limit(800).execute().data or []
             unique_poly = {}
             for p in poly_raw:
