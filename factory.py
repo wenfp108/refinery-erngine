@@ -58,15 +58,27 @@ class UniversalFactory:
         return day_processed_ids
 
     def fetch_elite_signals(self):
-        """🌟 严格保留你的原装权重 50/60/30/80"""
+        """🌟 严格保留你的原装权重 40/60/30/80"""
         try:
             supabase = create_client(self.supabase_url, self.supabase_key)
             print("💎 启动 2 小时一度精锐筛选...")
 
-            # 1. GitHub & Paper
-            rare_raw = supabase.table("raw_signals").select("*").or_("signal_type.eq.github,signal_type.eq.paper").order("created_at", desc=True).limit(50).execute().data or []
+            # 1. GitHub & Paper (各保底 20 条)
+            print("💎 正在分别获取 GitHub 和 Paper 信号...")
+            
+            # A. 抓取 GitHub (前20)
+            github_raw = supabase.table("raw_signals").select("*").eq("signal_type", "github").order("created_at", desc=True).limit(20).execute().data or []
+            
+            # B. 抓取 Paper (前20) - 这样就算 GitHub 有100条新数据，Paper 也能稳拿20个席位
+            paper_raw = supabase.table("raw_signals").select("*").eq("signal_type", "paper").order("created_at", desc=True).limit(20).execute().data or []
+
+            # C. 合并数据
+            rare_raw = github_raw + paper_raw
+
+            # D. 去重逻辑 (保持不变)
             unique_rare = {}
             for r in rare_raw:
+                # GitHub用 repo_name 做主键，Paper 用 title 做主键
                 k = r.get('repo_name') or r.get('title')
                 if k and k not in unique_rare: unique_rare[k] = r
             rare_picks = list(unique_rare.values())
