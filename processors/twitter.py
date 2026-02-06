@@ -76,16 +76,25 @@ TOPIC_RULES = {
     ]
 }
 
-# === 🛡️ 4. VIP 白名单 ===
+# === 🛡️ 4. VIP 白名单 (The "Economist" Stream) ===
+# 基于用户提供的 45 位高质量博主列表生成的增强版白名单
 VIP_AUTHORS = [
+    # --- Tech & Science (技术与科学) ---
     "Karpathy", "Yann LeCun", "Paul Graham", "Sam Altman", "François Chollet", 
-    "Rowan Cheung", "Naval", "Palmer Luckey", "Anduril", "Elon Musk",
+    "Rowan Cheung", "Naval", "Palmer Luckey", "Anduril", "Elon Musk", 
+    "VitalikButerin", "Eric Topol", "fchollet", "A_Sloane",
+
+    # --- Finance & Economy (金融与经济) ---
     "Nick Timiraos", "Ray Dalio", "Mohamed A. El-Erian", "Kobeissi Letter", 
     "Walter Bloomberg", "Zerohedge", "Lyn Alden", "MacroAlf", "Goldman Sachs",
-    "Peter Schiff", "Michael Saylor", "Nassim Nicholas Taleb", "CME Group",
-    "Fitch Ratings", "IMF", "Unusual Whales", "The Economist", "WSJ Central Banks",
-    "Ian Bremmer", "Eric Topol", "Vitalik", "SentDefender", "Visegrád 24",
-    "Spectator Index", "Disclose.tv", "Defense News", "Council on Foreign Relations"
+    "Peter Schiff", "Michael Saylor", "CME Group", "Fitch Ratings", "IMF", 
+    "Unusual Whales", "WSJ Central Banks", "Schuldensuehner", "Alasdair Macleod",
+    "DoombergT", "SantiagoAuFund", "Convertbond", "DeItaone", "Bloomberg",
+
+    # --- Politics & Geopolitics (政治与地缘) ---
+    "Ian Bremmer", "SentDefender", "Visegrád 24", "Spectator Index", 
+    "Disclose.tv", "Defense News", "Council on Foreign Relations", 
+    "The Economist", "RnaudBertrand", "David Fickling", "Balaji Srinivasan"
 ]
 
 def fmt_k(num):
