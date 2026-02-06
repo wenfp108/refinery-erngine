@@ -100,7 +100,7 @@ class UniversalFactory:
             paper_picks = list(unique_paper.values())[:30]  # 稳拿 30 条
             print(f"✅ Paper 独立处理完成：获 {len(paper_picks)} 条")
 
-            # === 4. Twitter (VIP 权重) - 保持原样 ===
+            # === 3. Twitter (VIP 权重) - 保持原样 ===
             tw_raw = supabase.table("raw_signals").select("*").eq("signal_type", "twitter").order("created_at", desc=True).limit(500).execute().data or []
             vip_list = ['Karpathy', 'Musk', 'Vitalik', 'LeCun', 'Dalio', 'Naval', 'Sama', 'PaulG']
             def score_twitter(row):
@@ -113,13 +113,13 @@ class UniversalFactory:
             for r in tw_raw: r['_rank'] = score_twitter(r)
             tw_picks = sorted(tw_raw, key=lambda x:x['_rank'], reverse=True)[:60]
 
-            # === 5. Reddit (Vibe 权重) - 保持原样 ===
+            # === 4. Reddit (Vibe 权重) - 保持原样 ===
             rd_raw = supabase.table("raw_signals").select("*").eq("signal_type", "reddit").order("created_at", desc=True).limit(500).execute().data or []
             unique_rd = {r.get('url'): r for r in rd_raw if r.get('url')}
             def score_reddit(row): return (row.get('score') or 0) * (1 + abs(float(row.get('vibe') or 0)))
             rd_picks = sorted(unique_rd.values(), key=score_reddit, reverse=True)[:30]
 
-            # === 6. Polymarket (Tail_Risk 权重) - 保持原样 ===
+            # === 5. Polymarket (Tail_Risk 权重) - 保持原样 ===
             poly_raw = supabase.table("raw_signals").select("*").eq("signal_type", "polymarket").order("created_at", desc=True).limit(800).execute().data or []
             unique_poly = {}
             for p in poly_raw:
@@ -140,7 +140,7 @@ class UniversalFactory:
                 return 1000000 + liq
             poly_picks = sorted(unique_poly.values(), key=score_poly, reverse=True)[:80]
 
-            return rare_picks + tw_picks + rd_picks + poly_picks
+            return github_picks + paper_picks + tw_picks + rd_picks + poly_picks
         except Exception as e:
             print(f"⚠️ 筛选异常: {e}"); return []
 
