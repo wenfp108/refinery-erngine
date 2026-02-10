@@ -14,7 +14,7 @@ class UniversalFactory:
         self.api_url = "https://api.siliconflow.cn/v1/chat/completions"
         self.supabase_url = os.environ.get("SUPABASE_URL")
         self.supabase_key = os.environ.get("SUPABASE_KEY")
-        self.v3_model = "deepseek-ai/DeepSeek-V3"
+        self.v3_model = "deepseek-ai/DeepSeek-V3.2"
         self.vault_path = None
         self.memory = {} 
 
