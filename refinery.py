@@ -159,7 +159,10 @@ def perform_grand_harvest(processors_config):
                 df.to_parquet(buffer, index=False, engine='pyarrow', compression='snappy')
                 
                 year_month = cutoff_date.strftime('%Y/%m')
-                archive_path = f"archive/{year_month}/{table}_{date_tag}.parquet"
+                # 🔥 修改开始：使用当前时间（精确到秒）作为文件名后缀
+                current_run_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
+                archive_path = f"archive/{year_month}/{table}_{current_run_tag}.parquet"
+                # 🔥 修改结束
                 
                 try:
                     private_repo.create_file(
@@ -170,6 +173,10 @@ def perform_grand_harvest(processors_config):
                     )
                 except Exception as upload_e:
                     print(f"   ⚠️ 归档文件上传失败 (可能已存在): {upload_e}")
+                    # 🔥 修改开始：添加刹车逻辑
+                    print("   🛑以此停止：为防止数据丢失，跳过删除步骤！")
+                    return 
+                    # 🔥 修改结束
                 
                 # 2. 清理逻辑 (删除已归档的数据)
                 # 使用循环分批删除，防止超时
