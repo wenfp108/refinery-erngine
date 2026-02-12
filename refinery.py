@@ -139,7 +139,7 @@ def generate_hot_reports(processors_config):
 # === 🚜 4. 滚动收割 (✅ 修正版：只清理 raw_signals) ===
 def perform_grand_harvest(processors_config):
     print("⏰ 触发每日滚动收割 (Archive & Purge)...")
-    cutoff_date = (datetime.now() - timedelta(days=7))
+    cutoff_date = (datetime.now() - timedelta(days=7)).replace(hour=23, minute=59, second=59)
     cutoff_str = cutoff_date.isoformat()
     date_tag = cutoff_date.strftime('%Y%m%d')
 
