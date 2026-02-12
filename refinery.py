@@ -155,6 +155,11 @@ def perform_grand_harvest(processors_config):
             if data:
                 # 转换为 Parquet 上传 GitHub
                 df = pd.DataFrame(data)
+
+                # 🔥🔥 [新增修复] 强制统一 raw_json 列类型为字符串，解决 pyarrow 混合类型报错 🔥🔥
+                if 'raw_json' in df.columns:
+                    df['raw_json'] = df['raw_json'].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (dict, list)) else str(x))
+                
                 buffer = io.BytesIO()
                 df.to_parquet(buffer, index=False, engine='pyarrow', compression='snappy')
                 
