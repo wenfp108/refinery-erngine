@@ -35,12 +35,18 @@ def process(raw_data, path):
     if isinstance(raw_data, dict) and "items" in raw_data: items = raw_data["items"]
     elif isinstance(raw_data, list): items = raw_data
     else: items = [raw_data]
-    
+
+    # 1. 备用时间（仅当 JSON 里没时间时使用）
     force_now_time = (datetime.utcnow() + timedelta(hours=8)).isoformat()
     
-    for item in items:
+   for item in items:
+        # 🔥 2. 核心修改：优先尝试获取原始数据的更新时间
+        # Polymarket 原始 JSON 通常带有 updatedAt 字段
+        raw_time = item.get('updatedAt') 
+        bj_time_final = to_bj_time(raw_time) if raw_time else force_now_time
+        
         entry = {
-            "bj_time": force_now_time,
+            "bj_time": bj_time_final, # ✅ 现在它是真实的或者是当时入库的时间
             "title": item.get('eventTitle'),
             "slug": item.get('slug'),
             "ticker": item.get('ticker'),
